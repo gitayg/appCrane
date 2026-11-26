@@ -58,6 +58,16 @@ export const TLS_CONFIG_VERSION = 'tls1';
  */
 export const PG_CERT_GROUP = 'appcrane_cert_required';
 
+/**
+ * Postgres group role whose MEMBERS must use TLS but present no client
+ * certificate (the "TLS required" level, migration 315): for a catalogue
+ * image that can verify the server but cannot send a certificate. Same
+ * properties as PG_CERT_GROUP: NOLOGIN, no privileges, members cannot leave.
+ * A login in both groups is held to the certificate (its pg_hba lines come
+ * first).
+ */
+export const PG_TLS_GROUP = 'appcrane_tls_required';
+
 /** The engine user each image runs its server as (fixed; never user input). */
 const ENGINE_USER = { postgres: 'postgres', mariadb: 'mysql', mongo: 'mongodb', redis: 'redis' };
 
@@ -109,6 +119,9 @@ export function serverMountArg(hostDir) {
  *   3. members of PG_CERT_GROUP over anything else: reject. Without this line
  *      a plain-text connection would fall through to line 4 and get in with
  *      the password alone.
+ *   3a. members of PG_TLS_GROUP over TLS: scram-sha-256, no certificate;
+ *      over anything else: reject. After the cert lines, so a member of
+ *      both groups is held to the certificate.
  *   4. everyone else (catalogue logins, the superuser): password, TLS
  *      optional — `host` matches both TLS and plain connections.
  *
@@ -129,6 +142,8 @@ export function pgHbaConf({ strict = false } = {}) {
     'local   all  all                       trust',
     `hostssl all  +${PG_CERT_GROUP}  all  scram-sha-256 clientcert=verify-full`,
     `host    all  +${PG_CERT_GROUP}  all  reject`,
+    `hostssl all  +${PG_TLS_GROUP}  all  scram-sha-256`,
+    `host    all  +${PG_TLS_GROUP}  all  reject`,
     strict
       ? 'host    all  all                  all  reject'
       : 'host    all  all                  all  scram-sha-256',
@@ -136,21 +151,53 @@ export function pgHbaConf({ strict = false } = {}) {
   ].join('\n');
 }
 
-/** True when a pg_hba.conf body is the strict one pgHbaConf() writes. */
+/**
+ * The strict body v2.146.0 and earlier wrote (no PG_TLS_GROUP lines). Still
+ * read as strict, so the first ensureServer() after an upgrade keeps a strict
+ * server strict instead of writing the loose body until the next sync.
+ */
+const LEGACY_STRICT_PG_HBA = pgHbaConf({ strict: true })
+  .split('\n').filter((l) => !l.includes(`+${PG_TLS_GROUP} `)).join('\n');
+
+/** True when a pg_hba.conf body is the strict one pgHbaConf() writes (or wrote before the TLS group). */
 export function isStrictPgHba(body) {
-  return pgHbaConf({ strict: true }) === String(body || '');
+  const b = String(body || '');
+  return b === pgHbaConf({ strict: true }) || b === LEGACY_STRICT_PG_HBA;
 }
 
 /**
  * Login roles the ENGINE would let in over TCP with a password alone: can
- * log in, not the superuser, not a member of the cert group. COPY ... TO
- * STDOUT prints one name per line and nothing else, under psql -q.
+ * log in, not the superuser, not a member of the cert group or the TLS
+ * group. COPY ... TO STDOUT prints one name per line and nothing else,
+ * under psql -q. The TLS group is checked only where it exists, so the
+ * statement still runs on a server whose hardenServer() has not created it.
  */
 export function pgPasswordOnlyRolesSql() {
   return [
     'COPY (SELECT rolname FROM pg_roles r WHERE rolcanlogin AND NOT rolsuper',
-    `  AND NOT pg_has_role(r.oid, '${PG_CERT_GROUP}', 'MEMBER') ORDER BY rolname) TO STDOUT;`,
+    `  AND NOT pg_has_role(r.oid, '${PG_CERT_GROUP}', 'MEMBER')`,
+    `  AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE g.rolname = '${PG_TLS_GROUP}' AND m.member = r.oid)`,
+    '  ORDER BY rolname) TO STDOUT;',
   ].join('\n');
+}
+
+/** 't' when the login is a member of the TLS group, 'f' otherwise (also for a role or group that does not exist). */
+export function pgTlsMemberSql(username) {
+  if (!SAFE_IDENT.test(username)) throw new Error(`managedDbTls: refusing identifier ${JSON.stringify(username)}`);
+  return `COPY (SELECT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE g.rolname = '${PG_TLS_GROUP}' AND r.rolname = '${username}')) TO STDOUT;\n`;
+}
+
+/**
+ * Undo the "TLS required" level for one login (managedDb.revertTls), or null
+ * when there is nothing to send. Postgres: leave the TLS group. MariaDB:
+ * REQUIRE NONE, except for a certificate login, whose REQUIRE SUBJECT/ISSUER
+ * must stay.
+ */
+export function tlsRevertSql(engine, username, { certRequired = false } = {}) {
+  if (!SAFE_IDENT.test(username)) throw new Error(`managedDbTls: refusing identifier ${JSON.stringify(username)}`);
+  if (engine === 'postgres') return `REVOKE ${PG_TLS_GROUP} FROM "${username}";\n`;
+  if (engine === 'mariadb') return certRequired ? null : `ALTER USER '${username}'@'%' REQUIRE NONE;\n`;
+  throw new Error(`managedDbTls: no TLS level for engine '${engine}'`);
 }
 
 /** 't' when the login is a member of the cert group, 'f' otherwise (also for a role that does not exist). */
@@ -201,10 +248,19 @@ export function pgServerArgs({ maxConnections, pgStatStatements = false }) {
 
 /** Idempotent: the group exists afterwards whether or not it did before. */
 export function pgCertGroupSql() {
+  return pgGroupSql(PG_CERT_GROUP);
+}
+
+/** Idempotent, like pgCertGroupSql(), for the TLS group. */
+export function pgTlsGroupSql() {
+  return pgGroupSql(PG_TLS_GROUP);
+}
+
+function pgGroupSql(group) {
   return [
     'DO $$ BEGIN',
-    `  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PG_CERT_GROUP}') THEN`,
-    `    CREATE ROLE ${PG_CERT_GROUP} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;`,
+    `  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${group}') THEN`,
+    `    CREATE ROLE ${group} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;`,
     '  END IF;',
     'END $$;',
   ].join('\n');
@@ -246,15 +302,19 @@ const SAFE_IDENT = /^[a-z][a-z0-9_]{0,62}$/;
  *                 MariaDB: REQUIRE SUBJECT '/CN=<login>' AND ISSUER '/CN=<CA>'
  *                 — implies TLS, demands a CA-signed cert for exactly this
  *                 login, and the password is still checked.
+ *   tlsRequired   (ignored when certRequired) Postgres: GRANT the TLS group,
+ *                 created here if missing. MariaDB: REQUIRE SSL — TLS and the
+ *                 password, no certificate.
  *   connLimit     Postgres CONNECTION LIMIT / MariaDB MAX_USER_CONNECTIONS.
  *   statementTimeoutS  Postgres statement_timeout (role default) / MariaDB
  *                 MAX_STATEMENT_TIME. 0 = none.
  *
  * certRequired=false never REMOVES a requirement: the flag is sticky
  * (migration 108), and a catalogue login never had one. So the MariaDB branch
- * leaves REQUIRE untouched rather than writing REQUIRE NONE.
+ * leaves REQUIRE untouched rather than writing REQUIRE NONE. tlsRequired is
+ * sticky the same way (migration 315).
  */
-export function loginPolicySql(engine, username, { certRequired, connLimit, statementTimeoutS }) {
+export function loginPolicySql(engine, username, { certRequired, tlsRequired = false, connLimit, statementTimeoutS }) {
   if (!SAFE_IDENT.test(username)) throw new Error(`managedDbTls: refusing identifier ${JSON.stringify(username)}`);
   const limit = Number(connLimit);
   const timeout = Number(statementTimeoutS);
@@ -268,10 +328,13 @@ export function loginPolicySql(engine, username, { certRequired, connLimit, stat
         ? `ALTER ROLE "${username}" SET statement_timeout = '${timeout}s';`
         : `ALTER ROLE "${username}" RESET statement_timeout;`,
       ...(certRequired ? [`GRANT ${PG_CERT_GROUP} TO "${username}";`] : []),
+      ...(!certRequired && tlsRequired ? [pgTlsGroupSql(), `GRANT ${PG_TLS_GROUP} TO "${username}";`] : []),
     ].join('\n');
   }
   if (engine === 'mariadb') {
-    const require = certRequired ? ` REQUIRE SUBJECT '/CN=${username}' AND ISSUER '/CN=${CA_COMMON_NAME}'` : '';
+    const require = certRequired
+      ? ` REQUIRE SUBJECT '/CN=${username}' AND ISSUER '/CN=${CA_COMMON_NAME}'`
+      : (tlsRequired ? ' REQUIRE SSL' : '');
     return `ALTER USER '${username}'@'%'${require} WITH MAX_USER_CONNECTIONS ${limit} MAX_STATEMENT_TIME ${timeout};\n`;
   }
   throw new Error(`managedDbTls: no login policy for engine '${engine}'`);

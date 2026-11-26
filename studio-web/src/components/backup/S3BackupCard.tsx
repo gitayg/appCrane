@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { adminApi, authHeaders } from '../../adminApi'
+import { confirmInstanceName } from './configArchiveFetch'
 import { PasswordInput } from '../secret/PasswordInput'
 import { serverDate } from '../../utils/serverDate'
 
@@ -121,8 +122,10 @@ export function S3BackupCard({ onConfig }: { onConfig?: (cfg: S3Config) => void 
       'then restarts the server. Managed databases are not restored by this step.\n\nType the backup id to confirm:')
     if (typed === null) return
     run('Restore', async () => {
+      const instance = await confirmInstanceName()
+      if (instance === null) return
       const r = await adminApi.post<{ message?: string; repos?: { restored: string[]; failed: { slug: string }[] } }>(
-        `${BASE}/backups/${encodeURIComponent(b.id)}/restore`, { confirm: typed.trim() })
+        `${BASE}/backups/${encodeURIComponent(b.id)}/restore`, { confirm: typed.trim(), instance })
       setMsg({ ok: true, text: `${r.message || 'Restored.'} Repositories restored: ${r.repos?.restored.length ?? 0}${r.repos?.failed.length ? `, failed: ${r.repos.failed.map(f => f.slug).join(', ')}` : ''}. Wait ~10s, then refresh.` })
     })
   }

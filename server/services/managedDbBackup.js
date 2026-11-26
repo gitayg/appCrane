@@ -302,12 +302,13 @@ export async function dumpAll(stageDir, { ops = null } = {}) {
  * ownership/grants provisioning gives it, and the managed-database TLS/cert/limit policy
  * from the row and the platform settings. certRequired comes from the ROW,
  * which is sticky at 1 (migration 108), so this can only re-assert a
- * certificate requirement, never drop one.
+ * certificate requirement, never drop one. tlsRequired likewise (migration
+ * 315).
  */
 export async function reapplyLoginPolicy(row, ops) {
   const settings = getManagedDbSettings(getDb());
   const certRequired = row.client_cert_required === 1;
-  const policy = { certRequired, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s };
+  const policy = { certRequired, tlsRequired: row.tls_required === 1, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s };
   if (row.engine === 'postgres') {
     await ops.runAdminSql('postgres', cmd.pgSchemaGrantsSql(row.db_user), { database: row.db_name });
     await ops.runAdminSql('postgres', tlsCfg.loginPolicySql('postgres', row.db_user, policy));

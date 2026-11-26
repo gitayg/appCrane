@@ -1,5 +1,7 @@
 import { getDb } from '../db.js';
 import { encrypt, decrypt } from './encryption.js';
+import { AppError } from '../utils/errors.js';
+import { guardedSettingKey } from './settingsOwnedKeys.js';
 
 // v2.21.43: first-class config export/import between AppCrane instances, with
 // re-encrypt-on-migrate so encrypted secrets move without sharing keys.
@@ -45,20 +47,34 @@ export function exportConfig(db = getDb()) {
  * needed only to decrypt the encrypted values first (decrypt-old → encrypt-new).
  * Plaintext settings copy straight over. Nothing is decrypted to disk.
  */
-export function importConfig(config, oldKeyHex, db = getDb()) {
+export function importConfig(config, oldKeyHex, db = getDb(), { includeProtected = false } = {}) {
   if (!config || config.kind !== 'appcrane-config' || !Array.isArray(config.settings)) {
     throw new Error('Not an AppCrane config export (missing kind/settings).');
   }
+  // v2.147.0: protective, owned and AppCrane-recorded keys have their own
+  // validated, audited routes. A snapshot naming any of them is refused whole
+  // unless the caller asked for include_protected; then each one is reported
+  // (old and new value, ciphertext redacted) for the route to audit.
+  const guarded = config.settings.filter((s) => s && guardedSettingKey(s.key)).map((s) => String(s.key));
+  if (guarded.length && !includeProtected) {
+    const err = new AppError(`This snapshot sets ${guarded.length} protected setting(s) that have their own routes: ${guarded.join(', ')}. Nothing was imported. Remove them, or pass include_protected=true from a signed-in session.`, 409, 'PROTECTED_SETTINGS');
+    err.publicDetails = { keys: guarded };
+    throw err;
+  }
+  const current = db.prepare('SELECT value FROM settings WHERE key = ?');
+  const shown = (v) => (isEncryptedBlob(v) ? '(encrypted)' : v ?? null);
   const upsert = db.prepare(`
     INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
   `);
-  const result = { imported: 0, reencrypted: 0, plaintext: 0, errors: [], regenerate: config.regenerate || [] };
+  const result = { imported: 0, reencrypted: 0, plaintext: 0, errors: [], regenerate: config.regenerate || [], keys: [], protected: [] };
 
   const run = db.transaction(() => {
     for (const s of config.settings) {
-      if (s.value == null) { upsert.run(s.key, null); result.imported++; continue; }
-      if (s.encrypted) {
+      const before = current.get(s.key)?.value;
+      if (s.value == null) {
+        upsert.run(s.key, null); result.imported++;
+      } else if (s.encrypted) {
         if (!oldKeyHex) { result.errors.push(`${s.key}: encrypted — re-run with the source ENCRYPTION_KEY (--old-key)`); continue; }
         let plain;
         try { plain = decrypt(s.value, oldKeyHex); }
@@ -69,6 +85,8 @@ export function importConfig(config, oldKeyHex, db = getDb()) {
         upsert.run(s.key, s.value);
         result.plaintext++; result.imported++;
       }
+      result.keys.push(s.key);
+      if (guarded.includes(String(s.key))) result.protected.push({ key: s.key, from: shown(before), to: s.encrypted ? '(encrypted)' : shown(s.value) });
     }
   });
   run();

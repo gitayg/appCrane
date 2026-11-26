@@ -279,9 +279,36 @@ fi
 # docker group, and — critically — make sure the daemon is actually RUNNING, not
 # just present. AppCrane's unit has Requires=docker.service, so a wedged Docker
 # means AppCrane never starts. Idempotent.
+#
+# Which Docker, on a fresh install only: Ubuntu's docker.io unless its candidate
+# has the reload bug (28.x, 29.0-29.2: a dockerd reload breaks host.docker.internal
+# for new containers) or is older than 27; then Docker CE >= 29.3 from Docker's
+# official repository, the same code path as scripts/docker-upgrade.sh.
+# APPCRANE_DOCKER_SOURCE=distro keeps docker.io regardless. An existing Docker
+# is never switched here; scripts/docker-upgrade.sh does that.
+APPCRANE_DOCKER_SOURCE="${APPCRANE_DOCKER_SOURCE:-auto}"
+[[ "$APPCRANE_DOCKER_SOURCE" =~ ^(auto|distro)$ ]] \
+  || die "APPCRANE_DOCKER_SOURCE must be 'auto' or 'distro' (got '$APPCRANE_DOCKER_SOURCE')"
 if ! command -v docker >/dev/null 2>&1; then
-  log "Installing Docker"
-  apt-get install -y docker.io
+  # shellcheck source=scripts/lib/docker-ce.sh
+  . "$REPO_DIR/scripts/lib/docker-ce.sh"
+  _distro_docker="$(apt-cache policy docker.io | awk '$1=="Candidate:" {print $2}')"
+  if [[ "$APPCRANE_DOCKER_SOURCE" == distro ]]; then
+    log "Installing Docker (docker.io ${_distro_docker:-?} from Ubuntu, APPCRANE_DOCKER_SOURCE=distro)"
+    dce_distro_unfit "${_distro_docker:-none}" \
+      && warn "docker.io ${_distro_docker:-?} has the dockerd reload bug; never reload Docker on this host (restart it). Later: sudo bash $REPO_DIR/scripts/docker-upgrade.sh"
+    apt-get install -y docker.io
+  elif dce_distro_unfit "${_distro_docker:-none}"; then
+    log "Ubuntu's docker.io (${_distro_docker:-none}) has the dockerd reload bug or is too old; installing Docker CE from Docker's repository"
+    if ! dce_fresh_install; then
+      warn "Docker CE could not be installed from Docker's repository; falling back to Ubuntu's docker.io ${_distro_docker:-?}."
+      warn "  It has the reload bug: never reload Docker on this host. Re-try later: sudo bash $REPO_DIR/scripts/docker-upgrade.sh"
+      apt-get install -y docker.io
+    fi
+  else
+    log "Installing Docker (docker.io ${_distro_docker} from Ubuntu)"
+    apt-get install -y docker.io
+  fi
 else
   log "Docker already installed: $(docker --version)"
 fi
@@ -315,8 +342,9 @@ _installed="$(dpkg -l 2>/dev/null | awk '$1=="ii"{print $2}')"
 if grep -qx docker.io <<<"$_installed" && grep -qE '^docker-ce' <<<"$_installed"; then
   warn "docker.io and Docker-CE package(s) are both installed — a mixed-source Docker:"
   warn "  $(grep -E '^docker-ce' <<<"$_installed" | paste -sd' ')"
-  warn "  Standardize on docker.io (what this installer uses) by removing the CE bits:"
-  warn "  apt-get remove -y '^docker-ce.*'"
+  warn "  Standardize on Docker CE (replaces docker.io in one transaction, restarts every container):"
+  warn "  sudo bash $REPO_DIR/scripts/docker-upgrade.sh"
+  warn "  or on docker.io (if its version has no reload bug) by removing the CE bits: apt-get remove -y '^docker-ce.*'"
 fi
 
 # Cap journald, syslog and Docker logs and keep a disk reserve — a full disk

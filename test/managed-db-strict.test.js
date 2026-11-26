@@ -96,11 +96,11 @@ test('pg_hba strict: only the last line changes, to reject; local trust and the 
   const lines = (o) => tls.pgHbaConf(o).split('\n').filter((l) => l && !l.startsWith('#')).map((l) => l.split(/\s+/));
   const loose = lines();
   const strict = lines({ strict: true });
-  assert.deepEqual(loose[3], ['host', 'all', 'all', 'all', 'scram-sha-256']);
-  assert.deepEqual(strict[3], ['host', 'all', 'all', 'all', 'reject']);
-  assert.deepEqual(strict.slice(0, 3), loose.slice(0, 3));
+  assert.deepEqual(loose[5], ['host', 'all', 'all', 'all', 'scram-sha-256']);
+  assert.deepEqual(strict[5], ['host', 'all', 'all', 'all', 'reject']);
+  assert.deepEqual(strict.slice(0, 5), loose.slice(0, 5));
   assert.deepEqual(strict[0], ['local', 'all', 'all', 'trust'], "AppCrane's own docker exec admin path keeps working");
-  assert.equal(strict.length, 4);
+  assert.equal(strict.length, 6);
   assert.equal(tls.isStrictPgHba(tls.pgHbaConf({ strict: true })), true);
   assert.equal(tls.isStrictPgHba(tls.pgHbaConf()), false);
   assert.equal(tls.isStrictPgHba(null), false);
@@ -502,9 +502,13 @@ test('routes: platform admin only; list from SQLite; conversion through the engi
     assert.deepEqual(list.body.logins.map((l) => l.login), [cat.username]);
     assert.ok(!JSON.stringify(list.body).includes('p'.repeat(32)));
 
+    // A platform-admin API key is refused outright (session only), before the engine.
+    const byKey = await call('POST', `/logins/${cat.id}/require-certificate`, PLATFORM);
+    assert.equal(byKey.status, 403, JSON.stringify(byKey.body));
+    assert.equal(byKey.body?.error?.code, 'SESSION_REQUIRED');
     // No explicit confirm: refused before the engine is touched.
     for (const body of [{}, { confirm: 'true' }, { confirm: 1 }]) {
-      const r = await call('POST', `/logins/${cat.id}/require-certificate`, PLATFORM, body);
+      const r = await call('POST', `/logins/${cat.id}/require-certificate`, session(0), body, 'session');
       assert.equal(r.status, 400, JSON.stringify(body));
       assert.equal(r.body?.error?.code, 'CONFIRMATION_REQUIRED');
     }
@@ -517,15 +521,15 @@ test('routes: platform admin only; list from SQLite; conversion through the engi
     assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
     engineCalls.length = 0;
 
-    const conv = await call('POST', `/logins/${cat.id}/require-certificate`, PLATFORM);
+    const conv = await call('POST', `/logins/${cat.id}/require-certificate`, session(0), { confirm: true }, 'session');
     assert.equal(conv.status, 200);
     assert.equal(conv.body.app_slug, 'strict-cat');
     assert.match(conv.body.note, /Redeploy or restart strict-cat/);
     const audit = getDb().prepare("SELECT app_id, detail FROM audit_log WHERE action = 'managed-db-require-certificate'").get();
     assert.equal(audit.app_id, CAT);
 
-    assert.equal((await call('POST', '/logins/424242/require-certificate', PLATFORM)).status, 404);
-    assert.equal((await call('POST', '/logins/abc/require-certificate', PLATFORM)).status, 404);
+    assert.equal((await call('POST', '/logins/424242/require-certificate', session(0), { confirm: true }, 'session')).status, 404);
+    assert.equal((await call('POST', '/logins/abc/require-certificate', session(0), { confirm: true }, 'session')).status, 404);
   } finally {
     routes.__setEngineForTests(null);
     server.closeAllConnections?.();

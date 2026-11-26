@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react'
-import { adminApi, authHeaders } from '../adminApi'
+import { adminApi } from '../adminApi'
 import { useFlash, FocusInput, FocusTextarea } from '../components/formHelpers'
 import { PasswordInput } from '../components/secret/PasswordInput'
 import { Users } from './Users'
@@ -25,6 +25,7 @@ import { TwoFactorCard } from '../components/mfa/TwoFactorCard'
 import { RestoreDrillsCard } from '../components/backup/RestoreDrillsCard'
 import { OffsiteHealthBanner, type OffsiteHealth } from '../components/backup/OffsiteHealthBanner'
 import { RecoveryKeyCard } from '../components/backup/RecoveryKeyCard'
+import { archiveFetch, confirmInstanceName } from '../components/backup/configArchiveFetch'
 import { EvidencePackPanel } from '../components/compliance/EvidencePackPanel'
 import { SignInPolicyCard } from '../components/mfa/SignInPolicyCard'
 import { SignInRiskPanel } from '../components/signinRisk/SignInRiskPanel'
@@ -1098,6 +1099,7 @@ function MailTab() {
   const [whatsNewSaved, flashWhatsNewSaved] = useFlash()
   const [accessMail, setAccessMail] = useState(true)
   const [accessMailSaved, flashAccessMailSaved] = useFlash()
+  const [accessMailError, setAccessMailError] = useState<string | null>(null)
 
   function load() {
     adminApi.get<{ mail: typeof cfg }>('/api/settings/mail/config').then(r => { if (r?.mail) setCfg(r.mail) }).catch(() => {})
@@ -1195,12 +1197,20 @@ function MailTab() {
           onChange={async e => {
             const next = e.target.checked
             setAccessMail(next)
-            await adminApi.put('/api/settings/app_access_mail_enabled', { value: next ? '1' : '0' }).catch(() => {})
-            flashAccessMailSaved()
+            setAccessMailError(null)
+            // adminApi asks for a step-up when turning it off needs one, and retries once.
+            try {
+              await adminApi.put('/api/settings/protected/app_access_mail_enabled', { value: next })
+              flashAccessMailSaved()
+            } catch (err) {
+              setAccessMail(!next)
+              setAccessMailError(err instanceof Error ? err.message : String(err))
+            }
           }}
         />
         <label htmlFor="app-access-email" style={{ fontSize: '.85rem' }}>Email users when their app access changes</label>
         {accessMailSaved && <span style={{ color: 'var(--green)' }}>Saved</span>}
+        {accessMailError && <span style={{ color: 'var(--red)' }}>Not saved: {accessMailError}</span>}
       </div>
       <p style={{ fontSize: '.75rem', color: 'var(--dim)', margin: '6px 0 0 24px' }}>
         A person gets one e-mail when they are given access to an app, their role on it changes, or their access is removed. A change undone within about 30 seconds sends nothing, and the creator of a new app is not told they own it.
@@ -1266,7 +1276,7 @@ function BackupTab() {
   async function download() {
     setBusy(true); setMsg(null)
     try {
-      const r = await fetch('/api/settings/config/export', { headers: authHeaders() })
+      const r = await archiveFetch('/api/settings/config/export')
       if (!r.ok) throw new Error(`Export failed (${r.status})`)
       const blob = await r.blob()
       const cd = r.headers.get('Content-Disposition') || ''
@@ -1287,13 +1297,15 @@ function BackupTab() {
       (restoreEnv ? ' and .env' : '') + ' with the backup, then restarts the server. ' +
       'The current config is copied to a pre-import-<timestamp> folder first. Continue?'
     )) { if (fileRef.current) fileRef.current.value = ''; return }
+    const confirmName = await confirmInstanceName()
+    if (!confirmName) { if (fileRef.current) fileRef.current.value = ''; return }
     setImporting(true); setMsg(null)
     try {
       const fd = new FormData()
       if (recoveryKey.trim()) fd.append('encryption_key', recoveryKey.trim())
       fd.append('file', file)
-      const r = await fetch(`/api/settings/config/import?restore_env=${restoreEnv ? '1' : '0'}`, {
-        method: 'POST', headers: authHeaders(), body: fd,
+      const r = await archiveFetch(`/api/settings/config/import?restore_env=${restoreEnv ? '1' : '0'}&confirm=${encodeURIComponent(confirmName)}`, {
+        method: 'POST', body: fd,
       })
       const data = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(data?.error?.message || `Import failed (${r.status})`)

@@ -51,6 +51,10 @@ export const ACTIONS = Object.freeze({
   // routes/capabilities.js: approve, deny, confirm and revoke.
   approve_capability_request: Object.freeze({ label: 'approve a capability request', keys: 'grant', apiKey: 'allow', perApp: false }),
   disable_mfa: Object.freeze({ label: "turn off a user's two-factor sign-in", keys: 'grant', apiKey: 'allow', perApp: false }),
+  // Whole-platform archives and restores (v2.147.0). The archive routes also
+  // refuse every credential but a session (configArchiveGuard.js); the image
+  // load and the production managed-DB restore take a key holding a grant.
+  platform_archive: Object.freeze({ label: 'export, import or restore a platform backup, or weaken a protected setting', keys: 'grant', apiKey: 'grant', perApp: false }),
 });
 
 export const INTERACTIVE_KINDS = Object.freeze(['session']);

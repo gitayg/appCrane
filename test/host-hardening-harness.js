@@ -136,11 +136,11 @@ const skipNet = (rel) => netImages[rel] ? false : 'docker (or the package mirror
 
 // Runs <body> in a privileged container where `hh` runs the script and prints
 // "@@EXIT <code>". /opt/appcrane/scripts also holds install-host-hardening.sh
-// and appcrane-publish-chain.sh. Returns the combined output.
+// appcrane-publish-chain.sh and appcrane-db-chain.sh. Returns the combined output.
 function runNet(rel, body, { env = {}, timeout = 60000 } = {}) {
   const script = [
     'mkdir -p /opt/appcrane/scripts /opt/appcrane/data',
-    'cp /src/scripts/host-hardening.sh /src/scripts/install-host-hardening.sh /src/scripts/appcrane-publish-chain.sh /opt/appcrane/scripts/',
+    'cp /src/scripts/host-hardening.sh /src/scripts/install-host-hardening.sh /src/scripts/appcrane-publish-chain.sh /src/scripts/appcrane-db-chain.sh /opt/appcrane/scripts/',
     'printf "DATA_DIR=/opt/appcrane/data\\n" > /opt/appcrane/.env',
     'hh() { echo @@RUN; APPCRANE_RESERVE_MIN_FREE_GB=100000 bash /opt/appcrane/scripts/host-hardening.sh 2>&1; echo "@@EXIT $?"; }',
     body,

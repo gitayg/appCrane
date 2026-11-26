@@ -5,6 +5,7 @@ import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { sleepRow, setSleepState } from './envSleepState.js';
 import { toSqlTime } from './envActivity.js';
+import { withDbAccessDuringStart } from './hostFirewall/dbChain.js';
 
 // Putting an environment to sleep and waking it.
 //
@@ -204,7 +205,10 @@ export async function wakeEnv(app, env, { reason = 'request', userId = null } = 
     }
     let recovering = false;
     try {
-      await d.docker(['start', containerNameOf(app.slug, env)], 60_000);
+      // APPCRANE-DB: `docker start` can hand the container a new address, so
+      // its database ports are held open until that address is on the list.
+      const name = containerNameOf(app.slug, env);
+      await withDbAccessDuringStart(name, () => d.docker(['start', name], 60_000));
     } catch (e) {
       if (!/no such (object|container)/i.test(e.message)) {
         setSleepState(d.db, app.id, env, { state: 'sleeping', last_error: `could not start: ${String(e.message).slice(0, 300)}` });

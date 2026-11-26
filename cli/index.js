@@ -46,7 +46,7 @@ async function api(method, path, body) {
   }
 }
 
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 const __clidir = dirname(fileURLToPath(import.meta.url));
@@ -81,41 +81,29 @@ const configCmd = program
     out.ok('Config saved');
   });
 
-// crane config export — snapshot this instance's settings for migration.
-// Encrypted secrets stay ciphertext (no plaintext in the file).
+// crane config export / import: since v2.147.0 /api/config refuses API keys
+// (403 SESSION_REQUIRED). A settings snapshot is taken or applied from a
+// signed-in dashboard session that stepped up recently, so the commands stay
+// listed and say where to go instead.
+function configArchiveMoved(what) {
+  out.err(`crane config ${what} no longer works with an API key: settings snapshots need a signed-in dashboard session with a recent step-up.`);
+  out.dim('Use the dashboard instead: Settings -> Backup & Restore (Export / Import), signed in as a platform admin.');
+  process.exit(1);
+}
+
 configCmd
   .command('export')
-  .description("Export this instance's settings for migration to another instance")
-  .option('--out <file>', 'Write to a file instead of stdout')
-  .action(async (opts) => {
-    const data = await api('GET', '/api/config/export');
-    const json = JSON.stringify(data, null, 2);
-    if (opts.out) {
-      writeFileSync(opts.out, json, { mode: 0o600 });
-      out.ok(`Exported ${data.settings.length} setting(s) → ${opts.out}`);
-      if (data.regenerate?.length) out.dim(`Not exportable (regenerate on target): ${data.regenerate.join(', ')}`);
-      out.dim('Secrets stay encrypted in the file, but keep it private and delete it after import.');
-    } else {
-      process.stdout.write(json + '\n');
-    }
-  });
+  .description("Export this instance's settings (moved to the dashboard: Settings -> Backup)")
+  .allowUnknownOption()
+  .allowExcessArguments()
+  .action(() => configArchiveMoved('export'));
 
-// crane config import <file> — apply an export onto THIS instance, re-encrypting
-// secrets with this instance's key. Provide the SOURCE key to decrypt them.
 configCmd
-  .command('import <file>')
-  .description("Import settings from an export, re-encrypting secrets with this instance's key")
-  .option('--old-key <hex>', 'Source instance ENCRYPTION_KEY (or set OLD_ENCRYPTION_KEY env) — only needed for encrypted secrets')
-  .action(async (file, opts) => {
-    let config;
-    try { config = JSON.parse(readFileSync(file, 'utf8')); }
-    catch (e) { out.err(`Cannot read ${file}: ${e.message}`); process.exit(1); }
-    const old_key = opts.oldKey || process.env.OLD_ENCRYPTION_KEY || '';
-    const res = await api('POST', '/api/config/import', { config, old_key });
-    out.ok(`Imported ${res.imported} setting(s) — ${res.reencrypted} secret(s) re-encrypted, ${res.plaintext} plaintext`);
-    if (res.regenerate?.length) out.dim(`Regenerate on this instance (one-way, not migratable): ${res.regenerate.join(', ')}`);
-    if (res.errors?.length) { out.header('Errors'); res.errors.forEach((e) => out.err(e)); }
-  });
+  .command('import [file]')
+  .description('Import settings from an export (moved to the dashboard: Settings -> Backup)')
+  .allowUnknownOption()
+  .allowExcessArguments()
+  .action(() => configArchiveMoved('import'));
 
 // ── Init (direct DB access, no server needed) ──────────────────────────────
 program

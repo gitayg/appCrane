@@ -1,7 +1,9 @@
 // Managed database logins that can still authenticate WITHOUT a client
 // certificate, and the Job Health check that reports them.
 //
-// A login is password-only while its row has client_cert_required = 0:
+// A login is password-only while its row has client_cert_required = 0 and
+// tls_required = 0 (a "TLS required" login, migration 315, is listed apart by
+// tlsOnlyLogins(): TLS + password, no client certificate):
 //   postgres  not in the cert group, so pg_hba's last line lets it in with the
 //             password over TLS or plain text
 //   mariadb   no REQUIRE SUBJECT/ISSUER, so the password alone is enough
@@ -18,6 +20,7 @@ import { getDb } from '../db.js';
 import log from '../utils/logger.js';
 import { jobStarted, trackJob, setJobDetail } from './jobHealth.js';
 import { envForTenant } from './sandboxDb.js';
+import { findEntry } from './catalogService.js';
 
 export const JOB_ID = 'managed-db-logins';
 const CHECK_MS = 60 * 60_000;
@@ -30,14 +33,33 @@ const CONVERT_NOTE = {
   redis: 'The instance is recreated with TLS and its own CA (the Redis container restarts once).',
 };
 
-export function passwordOnlyLogins({ engine = null, db = getDb() } = {}) {
-  const rows = db.prepare(
-    `SELECT m.id, m.app_id, a.slug AS app_slug, m.tenant, m.engine, m.db_name, m.db_user,
+/** Engines with a "TLS required" level (managedDb.requireTls). */
+export const TLS_LEVEL_ENGINES = ['postgres', 'mariadb'];
+export const TLS_LEVEL_LABEL = 'TLS + password (no client certificate)';
+const TLS_NOTE = {
+  postgres: 'Joins the TLS group: TLS and the password, no client certificate; plain connections are refused.',
+  mariadb: 'REQUIRE SSL: TLS and the password, no client certificate; plain connections are refused.',
+};
+
+/**
+ * Whether AppCrane can point the app at the CA after Require TLS: a catalogue
+ * entry that names its image's CA variable (appCatalog.json `tls_ca_env`).
+ * Otherwise the app gets DB_CA_FILE and, for a URL AppCrane builds, the TLS
+ * parameters, and may still not use TLS.
+ */
+function tlsCaEnvFor(catalogSlug) {
+  const needs = catalogSlug ? findEntry(catalogSlug)?.needs : null;
+  return typeof needs?.tls_ca_env === 'string' && needs.tls_ca_env ? needs.tls_ca_env : null;
+}
+
+function loginsWhere(where, args, extra) {
+  const rows = getDb().prepare(
+    `SELECT m.id, m.app_id, a.slug AS app_slug, a.catalog_slug, m.tenant, m.engine, m.db_name, m.db_user,
             m.app_user, m.app_password_enc IS NOT NULL AS app_enabled
        FROM managed_databases m LEFT JOIN apps a ON a.id = m.app_id
-      WHERE m.client_cert_required IS NOT 1 ${engine ? 'AND m.engine = ?' : ''}
+      WHERE ${where}
       ORDER BY a.slug, m.engine, m.tenant`
-  ).all(...(engine ? [engine] : []));
+  ).all(...args);
   const out = [];
   for (const r of rows) {
     const base = {
@@ -46,12 +68,39 @@ export function passwordOnlyLogins({ engine = null, db = getDb() } = {}) {
       app_slug: r.app_slug || null,
       env: envForTenant(r.tenant) || r.tenant,
       engine: r.engine,
-      convert_note: CONVERT_NOTE[r.engine] || null,
+      ...extra(r),
     };
     out.push({ ...base, login: r.db_user, kind: 'owner' });
     if (r.app_user && r.app_enabled) out.push({ ...base, login: r.app_user, kind: 'app' });
   }
   return out;
+}
+
+/** Logins under "TLS required": TLS and the password, no client certificate. */
+export function tlsOnlyLogins({ engine = null } = {}) {
+  return loginsWhere(
+    `m.client_cert_required IS NOT 1 AND m.tls_required = 1 ${engine ? 'AND m.engine = ?' : ''}`,
+    engine ? [engine] : [],
+    (r) => ({ level: 'tls', level_label: TLS_LEVEL_LABEL, convert_note: CONVERT_NOTE[r.engine] || null }),
+  );
+}
+
+export function passwordOnlyLogins({ engine = null } = {}) {
+  return loginsWhere(
+    `m.client_cert_required IS NOT 1 AND m.tls_required IS NOT 1 ${engine ? 'AND m.engine = ?' : ''}`,
+    engine ? [engine] : [],
+    (r) => {
+      const tlsAvailable = TLS_LEVEL_ENGINES.includes(r.engine);
+      return {
+        level: 'password',
+        convert_note: CONVERT_NOTE[r.engine] || null,
+        tls_available: tlsAvailable,
+        tls_note: tlsAvailable ? TLS_NOTE[r.engine] : null,
+        tls_ca_env: tlsAvailable ? tlsCaEnvFor(r.catalog_slug) : null,
+        catalogue: Boolean(r.catalog_slug),
+      };
+    },
+  );
 }
 
 /**
@@ -118,6 +167,7 @@ export function certProblems({ db = getDb() } = {}) {
  */
 export async function runManagedDbLoginsCheck({ sync = null } = {}) {
   const logins = passwordOnlyLogins();
+  const tlsLogins = tlsOnlyLogins();
   let pg = null;
   try {
     const syncPgHba = sync || (await import('./managedDb.js')).syncPgHba;
@@ -132,8 +182,13 @@ export async function runManagedDbLoginsCheck({ sync = null } = {}) {
     ? `${problems.length} certificate login(s) need attention: `
       + problems.map((p) => `${p.app_slug || `app ${p.app_id}`} ${p.env || ''} ${p.engine} ${p.login}: ${p.label}`.replace(/\s+/g, ' ')).join('; ') + '.'
     : '';
+  const tlsText = tlsLogins.length
+    ? `${tlsLogins.length} login(s) require TLS and the password but no client certificate: `
+      + tlsLogins.map((l) => `${l.app_slug || `app ${l.app_id}`} ${l.env || ''} ${l.engine} ${l.login}`.replace(/\s+/g, ' ')).join('; ') + '.'
+    : '';
   const detail = {
     logins,
+    tls_logins: tlsLogins,
     postgres_engine_roles_without_certificate: extra,
     cert_problems: problems,
     postgres_strict: pg?.strict ?? null,
@@ -143,8 +198,10 @@ export async function runManagedDbLoginsCheck({ sync = null } = {}) {
         + [...logins.map((l) => `${l.app_slug || `app ${l.app_id}`} ${l.env || ''} ${l.engine} ${l.login}`.replace(/\s+/g, ' ')),
           ...extra.map((r) => `postgres role ${r} (not an AppCrane login)`)].join('; ')
         + '. Platform admin: Managed databases, Require certificate.'
-      : problems.length ? '' : 'Every managed database login requires TLS and its own client certificate.'
+      : problems.length || tlsLogins.length ? '' : 'Every managed database login requires TLS and its own client certificate.'
         + (pg?.strict ? ' Postgres refuses every TCP login without one (strict pg_hba).' : ''),
+    !n && tlsLogins.length ? 'No managed database login signs in with a password alone.' : '',
+    tlsText,
     problemText].filter(Boolean).join(' '),
     ...(pg?.error ? { postgres_error: pg.error } : {}),
   };

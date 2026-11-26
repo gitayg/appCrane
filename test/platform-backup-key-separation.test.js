@@ -219,7 +219,9 @@ test('POST /api/settings/config/import takes the recovery key as encryption_key,
     copyFileSync(${JSON.stringify(archive)}, join(process.env.DATA_DIR, 'backups', 'night.tar.gz'));
     const { generateApiKey, hashApiKey } = await import('./server/services/encryption.js');
     const key = generateApiKey('dhk_t');
-    db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('pa','pa@t.test','platform_admin',?,1,'human')").run(hashApiKey(key));
+    const uid = db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('pa','pa@t.test','platform_admin',?,1,'human')").run(hashApiKey(key)).lastInsertRowid;
+    const sess = generateApiKey('sess');
+    db.prepare("INSERT INTO identity_sessions (user_id, token_hash, expires_at) VALUES (?, ?, datetime('now', '+1 day'))").run(uid, hashApiKey(sess));
     const express = (await import('express')).default;
     const api = express();
     api.use(express.json());
@@ -227,19 +229,24 @@ test('POST /api/settings/config/import takes the recovery key as encryption_key,
     api.use((await import('./server/utils/errors.js')).errorHandler);
     const srv = await new Promise((res) => { const s = api.listen(0, '127.0.0.1', () => res(s)); });
     const post = async (body) => {
-      const x = await fetch('http://127.0.0.1:' + srv.address().port + '/api/settings/config/import', { method: 'POST', headers: { 'X-API-Key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const x = await fetch('http://127.0.0.1:' + srv.address().port + '/api/settings/config/import', { method: 'POST', headers: { Authorization: 'Bearer ' + sess, 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: 'crane.t.test', ...body }) });
       return { status: x.status, body: await x.json() };
     };
     const without = await post({ path: 'night.tar.gz' });
     const withKey = await post({ path: 'night.tar.gz', encryption_key: ${JSON.stringify(K_A)} });
     srv.close();
-    return { without: { status: without.status, message: without.body.error?.message }, withKey: { status: withKey.status, key: withKey.body.encryptionKey } };
+    const audit = db.prepare("SELECT detail FROM audit_log WHERE action = 'config-import'").all().map((a) => JSON.parse(a.detail));
+    return { without: { status: without.status, message: without.body.error?.message }, withKey: { status: withKey.status, key: withKey.body.encryptionKey }, audit };
   `);
   assert.equal(r.code, 0, r.all);
   assert.equal(r.result.without.status, 400);
   assert.match(r.result.without.message, /needs the ENCRYPTION_KEY with fingerprint/);
   assert.equal(r.result.withKey.status, 200, JSON.stringify(r.result.withKey));
   assert.equal(r.result.withKey.key.source, 'supplied');
+  assert.equal(r.result.audit.length, 1, 'the import was not audited');
+  assert.equal(r.result.audit[0].encryption_key_replaced, true, 'the audit row does not say ENCRYPTION_KEY was replaced');
+  assert.notEqual(r.result.audit[0].encryption_key_before, r.result.audit[0].encryption_key_after);
+  assert.equal(r.result.audit[0].recovery_key_supplied, true);
   assert.match(readFileSync(join(dir, '.env'), 'utf8'), new RegExp(`^ENCRYPTION_KEY=${K_A}$`, 'm'));
   const after = await run(dir, READ_BACK);
   assert.equal(after.result.plain, 'stored-plain');

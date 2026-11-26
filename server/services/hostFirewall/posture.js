@@ -5,6 +5,7 @@ import { dbPorts, readDockerPublishes, computeDesired } from './desired.js';
 import { CHAIN, SKELETON_CHAIN, FAMILIES, parseChain, sameEntries, permissionDenied, HELPER } from './rules.js';
 import { readHostNet, isPublicAddr, defaultReadFile, readHostNetworkState, stateSaysEnforcing, HOST_NETWORK_STATE } from './hostNet.js';
 import { parseRules, evaluateInput } from './inputEval.js';
+import { getLastDbSync } from './dbChain.js';
 
 // The host's real network posture, read from the rules the kernel holds and
 // the sockets that are listening. Nothing here sends a packet off the host.
@@ -172,6 +173,13 @@ export async function computePosture({ deps = {}, db = getDb(), now = Date.now()
       /not running as root/.test(lastSync.reason || '') ? `Apply Host limits again so scripts/install-host-hardening.sh installs ${HELPER} and its sudoers rule, or run AppCrane as root.` : 'See Job Health > Host network policy for the error.'));
   }
 
+  const dbSync = getLastDbSync();
+  if (dbSync?.status === 'failed') {
+    findings.push(finding('db-chain-sync-failed', 'medium',
+      `${dbSync.reason} A container started since the last good sync may be refused its managed database, and one that stopped may keep its place on the allowlist.`,
+      'See Job Health > Host network policy for the error.'));
+  }
+
   for (const s of desired.strays) {
     const fam = s.host_ip.includes(':') && families.v6.skeleton ? 'v6' : 'v4';
     const sk = families[fam].skeleton || null;
@@ -232,6 +240,26 @@ export async function computePosture({ deps = {}, db = getDb(), now = Date.now()
     host_network_state: state,
     imds: { ...imds, measured_at: imdsCache ? new Date(imdsCache.at).toISOString() : null },
     desired: desired.accept, strays: desired.strays, docker: desired.docker,
+    db: dbAllowlistView(getLastDbSync()),
+  };
+}
+
+/** APPCRANE-DB as last synced: per managed database port, who may connect. */
+export function dbAllowlistView(s) {
+  if (!s) return null;
+  const counts = s.would_drop?.ports || null;
+  return {
+    status: s.status, at: s.at, mode: s.mode, reason: s.reason,
+    allowlist_mode: s.allowlist_mode ?? null,
+    enforcement: s.enforcement ?? null,
+    jump: s.jump ?? null,
+    would_drop_since: s.would_drop?.since ?? null,
+    would_drop_unavailable: s.would_drop?.why ?? null,
+    ports: s.plan.map(p => ({
+      port: p.port, engine: p.engine, owner: p.owner, state: p.state,
+      allowed: p.allowed_containers, sources: p.allow, expected: p.expected, scopes: p.scopes, open_because: p.open_because,
+      would_drop: counts ? (counts[p.port] ?? 0) : null,
+    })),
   };
 }
 

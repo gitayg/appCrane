@@ -20,6 +20,7 @@ const SKELETON = (drop) => [
   '-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN',
   '-A DOCKER-USER -d 169.254.169.254/32 -i docker0 -j DROP',
   '-A DOCKER-USER -d 169.254.169.254/32 -i br-+ -j DROP',
+  '-A DOCKER-USER -o docker0 -m conntrack --ctstate DNAT -j APPCRANE-DB',
   '-A DOCKER-USER -i eth0 -j APPCRANE-PUBLISH',
   ...(drop ? ['-A DOCKER-USER -i eth0 -j DROP'] : []),
   '-A DOCKER-USER -j RETURN',
@@ -237,7 +238,8 @@ test('PORT in .env below 1024 or in the base allow list: refused, every chain le
   assert.match(out, /^@@BOOTDB 0$/m);
   for (const p of ['22', '1000:2000', '70000', '50000:40000']) assert.match(block(out, 'BOOTDBOUT'), new RegExp(`db port '${p}' in /var/lib/appcrane/host-network\\.state is not usable — skipped`));
   assert.deepEqual(block(out, 'SAVE5').split('\n').filter((l) => /-j DROP$/.test(l)), [
-    '-A APPCRANE-INPUT -i eth0 -p tcp -m tcp --dport 5001 -j DROP',
-    '-A APPCRANE-INPUT -i eth0 -p tcp -m tcp --dport 45432 -j DROP',
+    '-A APPCRANE-INPUT -i eth0 -p tcp -m tcp --dport 5001 -m conntrack --ctstate NEW -j DROP',
+    '-A APPCRANE-INPUT -i eth0 -p tcp -m tcp --dport 45432 -m conntrack --ctstate NEW -j DROP',
+    '-A APPCRANE-INPUT -i docker0 -p tcp -m multiport --dports 45432 -m conntrack --ctstate NEW -j DROP',
   ], 'a tampered db_ports drops only the usable entries');
 });

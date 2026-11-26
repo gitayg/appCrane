@@ -1,4 +1,10 @@
 {
+  "2.147.0": [
+    "Restoring or importing the whole platform, and loading Docker images, now need a signed-in dashboard session with a fresh step-up, and every one is audited; a leaked API key can no longer take over an instance.",
+    "AppCrane tracks which app containers may reach each managed database port and shows who else tries (observe mode); switching to enforce drops everyone else.",
+    "BookStack-style apps can move their database login to TLS-required in two reversible steps, checked against the app's real connections first.",
+    "Settings that weaken a protection have their own audited, admin-only route, and Job Health flags Docker versions with the reload bug, with an upgrade script that restarts AppCrane and rolls back on failure."
+  ],
   "2.146.0": [
     "AppCrane now repairs app containers that cannot reach it because of a broken host.docker.internal mapping: it recreates them itself, never during a deploy, restore or sleep, at most once every 6 hours each, and tells the app's owners.",
     "Host limits are applied automatically after every upgrade. On a server where AppCrane is not root, a release that changes the hardening script needs one root command, shown in Job Health; other upgrades apply on their own.",

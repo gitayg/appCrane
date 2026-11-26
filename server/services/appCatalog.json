@@ -488,7 +488,8 @@
         "user": "DB_USERNAME",
         "password": "DB_PASSWORD"
       },
-      "url_env": null
+      "url_env": null,
+      "tls_ca_env": "MYSQL_ATTR_SSL_CA"
     },
     "volume_paths": [
       "/config"

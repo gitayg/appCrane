@@ -30,7 +30,7 @@ if (netImages[R]) {
 }
 
 const dk = (...a) => execFileSync('docker', a, { encoding: 'utf8', timeout: 90000, stdio: ['ignore', 'pipe', 'pipe'] });
-const SKELETON = '-N DOCKER-USER\n-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN\n-A DOCKER-USER -d 169.254.169.254/32 -i docker0 -j DROP\n-A DOCKER-USER -d 169.254.169.254/32 -i br-+ -j DROP\n-A DOCKER-USER -i eth0 -j APPCRANE-PUBLISH\n-A DOCKER-USER -i eth0 -j DROP\n-A DOCKER-USER -j RETURN\n';
+const SKELETON = '-N DOCKER-USER\n-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN\n-A DOCKER-USER -d 169.254.169.254/32 -i docker0 -j DROP\n-A DOCKER-USER -d 169.254.169.254/32 -i br-+ -j DROP\n-A DOCKER-USER -o docker0 -m conntrack --ctstate DNAT -j APPCRANE-DB\n-A DOCKER-USER -i eth0 -j APPCRANE-PUBLISH\n-A DOCKER-USER -i eth0 -j DROP\n-A DOCKER-USER -j RETURN\n';
 
 const INPUT = '-P INPUT ACCEPT\n-A INPUT -j APPCRANE-INPUT\n';
 

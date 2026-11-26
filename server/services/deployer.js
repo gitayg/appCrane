@@ -150,6 +150,16 @@ export function buildManagedDbEnv(needs, creds) {
  *                                             Postgres/MariaDB certificate in
  *                                             an app that has both.
  *
+ * A "TLS required" login (tls.caOnly: TLS and the password, no client
+ * certificate) gets the CA only: DB_CA_FILE, and PGSSLMODE/PGSSLROOTCERT
+ * under the same PG* rule. A prepared login (tls.prepared: the image names
+ * its CA variable, the engine does not require TLS yet) gets DB_CA_FILE and
+ * that variable only.
+ *
+ * All of these also get the CA path under the variable the catalogue entry
+ * names for its image (appCatalog.json needs.tls_ca_env, e.g. BookStack's
+ * MYSQL_ATTR_SSL_CA), set only where that was read from the image itself.
+ *
  * The rediss:// URL itself carries NO certificate parameters: no Redis URL
  * convention is shared across clients, and a client that does not know a
  * query option either ignores it or refuses the URL (go-redis's ParseURL
@@ -159,6 +169,16 @@ export function buildManagedDbEnv(needs, creds) {
 export function tlsFileEnv(needs, creds) {
   const tls = creds?.tls;
   if (!tls) return {};
+  const caEnv = typeof needs?.tls_ca_env === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(needs.tls_ca_env) ? needs.tls_ca_env : null;
+  const speaksPgNames = creds.engine === 'postgres'
+    && Object.values(needs?.env || {}).some((v) => typeof v === 'string' && v.startsWith('PG'));
+  if (tls.caOnly) {
+    return {
+      DB_CA_FILE: tls.ca,
+      ...(speaksPgNames && !tls.prepared ? { PGSSLMODE: 'verify-full', PGSSLROOTCERT: tls.ca } : {}),
+      ...(caEnv ? { [caEnv]: tls.ca } : {}),
+    };
+  }
   const out = {
     DB_CA_FILE: tls.ca,
     DB_CERT_FILE: tls.cert,
@@ -172,9 +192,7 @@ export function tlsFileEnv(needs, creds) {
       REDIS_TLS_KEY_FILE: tls.key,
     });
   }
-  const speaksPg = creds.engine === 'postgres'
-    && Object.values(needs?.env || {}).some((v) => typeof v === 'string' && v.startsWith('PG'));
-  if (speaksPg) {
+  if (speaksPgNames) {
     Object.assign(out, {
       PGSSLMODE: 'verify-full',
       PGSSLROOTCERT: tls.ca,
@@ -182,6 +200,7 @@ export function tlsFileEnv(needs, creds) {
       PGSSLKEY: tls.key,
     });
   }
+  if (caEnv) out[caEnv] = tls.ca;
   return out;
 }
 
@@ -431,11 +450,18 @@ export async function injectManagedDbForEnv({
   if (resolved.needs) {
     const certRequired = resolved.source === 'manifest';
     try {
-      const secured = await secureLogin(scope, resolved.needs.engine, { certRequired, image });
+      const prepareTls = !certRequired && Boolean(resolved.needs.tls_ca_env);
+      const secured = await secureLogin(scope, resolved.needs.engine, { certRequired, prepareTls, image });
       mounts = secured.mounts || [];
       tls = secured.tls || null;
       if (secured.applied && secured.certRequired) {
         appendLog(`Managed ${resolved.needs.engine} database: TLS and this app's own client certificate are required; mounted read-only at ${mounts[0]?.container || '(none)'}`);
+      } else if (secured.applied && secured.tlsRequired) {
+        const caEnv = resolved.needs.tls_ca_env;
+        appendLog(`Managed ${resolved.needs.engine} database: TLS and the password are required (no client certificate); the CA is mounted read-only at ${mounts[0]?.container || '(none)'}`
+          + (caEnv ? ` and its path is in ${caEnv} and DB_CA_FILE` : '; its path is in DB_CA_FILE. This app\'s catalogue entry names no CA variable for its image, so the image may not use TLS and its connections may be refused'));
+      } else if (secured.applied && secured.tlsPrepared) {
+        appendLog(`Managed ${resolved.needs.engine} database: TLS prepared. The CA is mounted read-only at ${mounts[0]?.container || '(none)'} and its path is in ${resolved.needs.tls_ca_env} and DB_CA_FILE; the engine still accepts the password without TLS until a platform admin requires it`);
       }
     } catch (e) {
       // A catalogue login a platform admin converted (Require certificate) is
@@ -453,6 +479,16 @@ export async function injectManagedDbForEnv({
   // below is "the app set it", not "the owner-login step just set it".
   const ownKeys = [...Object.keys(runtimeEnvVars), ...claimedKeys];
   const mdbEnv = applyManagedDbEnv(app, runtimeEnvVars, claimedKeys, manifestNeeds, scope);
+  // "Prepare TLS": the CA path under the image's own variable and DB_CA_FILE,
+  // with the same precedence (the app's own value wins). The login's URL and
+  // other variables stay as they are: the engine does not require TLS yet.
+  if (tls?.prepared && mdbEnv.engine) {
+    for (const [k, v] of Object.entries(tlsFileEnv(resolved.needs, { engine: resolved.needs.engine, tls }))) {
+      if (ownKeys.includes(k)) { mdbEnv.deferred.push(k); continue; }
+      runtimeEnvVars[k] = v;
+      mdbEnv.injected.push(k);
+    }
+  }
 
   // deployhub.json extras. Manifest databases only (validated there), and
   // fail closed like the certificate step: a deploy that was told to hand the
@@ -2228,6 +2264,9 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
     try { prevImage = await getContainerImage(app.slug, env); } catch (_) {}
     // Set by the managed-database block below; the rollback start reuses it.
     let dbCertMounts = [];
+    // The database scope the container is started with, as the
+    // appcrane.db-scope label APPCRANE-DB reads (hostFirewall/dbDesired.js).
+    let dbScope = null;
 
     await dockerStop(app.slug, env).catch(() => {});
 
@@ -2275,6 +2314,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       // Kept apart from containerVolumes so the volume seeder never treats it
       // as an app data mount.
       dbCertMounts = mdbEnv.mounts || [];
+      dbScope = mdbEnv.separateSandbox ? SANDBOX_TENANT : '';
       if (mdbEnv.manifestIgnored) {
         appendLog(
           `Managed database: the deployhub.json "database" block was ignored — this app's ` +
@@ -2408,6 +2448,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
       memoryMb: limits.max_ram_mb,
       cpus: limits.max_cpu_percent / 100,
       addHostGateway: true,
+      dbScope,
       admission: { ...admissionCtx, onWarn: 'silent' },
     });
     appendLog(`Container started: appcrane-${app.slug}-${env} (host port ${bePort})`);
@@ -2575,7 +2616,7 @@ export async function deployApp(deployId, app, env, ports, opts = {}) {
         // in — no command means the previous image now exits 0, and fewer
         // mounts means the recovery container cannot see the state the failed
         // one was writing.
-        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: [...containerVolumes, ...dbCertMounts], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100, admission: false }).catch(() => {});
+        await dockerStart({ slug: app.slug, env, image: prevImage, hostPort: bePort, containerPort: app.container_port, command: parseContainerCommand(app.container_command), envVars: runtimeEnvVars, volumes: [...containerVolumes, ...dbCertMounts], memoryMb: limits.max_ram_mb, cpus: limits.max_cpu_percent / 100, dbScope, admission: false }).catch(() => {});
       }
       const restoreNote = prevImage
         ? 'Previous version restored.'

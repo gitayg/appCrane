@@ -14,8 +14,9 @@ interface Db {
   // Transport security (managed-database TLS). 'required' = TLS + this app's own client
   // certificate + password (deployhub.json databases); 'offered' = TLS
   // available, plain allowed (catalogue apps); 'none' = the instance has no
-  // TLS (a catalogue app's Redis).
-  tls?: 'required' | 'offered' | 'none' | null
+  // TLS (a catalogue app's Redis); 'tls_required' = TLS + password, no
+  // client certificate (a platform admin's Require TLS, migration 315).
+  tls?: 'required' | 'tls_required' | 'offered' | 'none' | null
   client_cert_expires_at?: string | null
   connection_limit?: number | null
 }
@@ -92,7 +93,9 @@ export function ManagedDatabaseCard({ slug, reload, onMsg }: Props) {
 
   const tlsTitle = (d: Db) => d.tls === 'required'
     ? 'The engine refuses this login unless it uses TLS and presents this app\'s own client certificate (mounted read-only at /run/appcrane/db) as well as its password.'
-    : d.tls === 'offered'
+    : d.tls === 'tls_required'
+      ? 'The engine refuses this login unless it uses TLS; it signs in with its password and no client certificate (CA mounted read-only at /run/appcrane/db).'
+      : d.tls === 'offered'
       ? 'The server speaks TLS; this login may also connect in plain text (catalogue images often cannot be configured for TLS).'
       : d.tls === 'none' ? 'This instance does not speak TLS.' : ''
 
@@ -116,7 +119,7 @@ export function ManagedDatabaseCard({ slug, reload, onMsg }: Props) {
                 <td className="am-mono">{d.username}</td>
                 <td>{usedBy(d)}</td>
                 <td title={tlsTitle(d)}>
-                  {d.tls === 'required' ? 'Required + client cert' : d.tls === 'offered' ? 'Offered' : d.tls === 'none' ? 'No' : '-'}
+                  {d.tls === 'required' ? 'Required + client cert' : d.tls === 'tls_required' ? 'Required (no client cert)' : d.tls === 'offered' ? 'Offered' : d.tls === 'none' ? 'No' : '-'}
                   {d.client_cert_expires_at && (
                     <div style={{ fontSize: '.7rem', color: 'var(--dim)' }}>cert until {d.client_cert_expires_at.slice(0, 10)}</div>
                   )}

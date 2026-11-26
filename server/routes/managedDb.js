@@ -519,23 +519,50 @@ serversRouter.post('/encryption/unload-key', requireAuth, requirePlatformAdmin, 
  *   POST /logins/:id/require-certificate  :id is managed_databases.id; converts
  *                                         that row's owner and `_app` logins
  *                                         (managedDb.requireCertificate)
+ *   POST /logins/:id/require-tls          same row, to "TLS required": TLS and
+ *                                         the password, no client certificate
+ *                                         (managedDb.requireTls; Postgres and
+ *                                         MariaDB only), once the TLS check
+ *                                         shows the app's connections use TLS
+ *   POST /logins/:id/tls-check            that check, from the engine
+ *                                         (managedDb.measureLoginTls)
+ *   POST /logins/:id/revert-tls           back to password (managedDb.revertTls)
  */
 serversRouter.get('/logins/password-only', requireAuth, requirePlatformAdmin, async (_req, res) => {
-  const { passwordOnlyLogins, certProblems } = await import('../services/managedDbPasswordOnly.js');
+  const { passwordOnlyLogins, tlsOnlyLogins, certProblems } = await import('../services/managedDbPasswordOnly.js');
   const { readServerFile } = await import('../services/dbCerts.js');
   const { isStrictPgHba } = await import('../services/managedDbTls.js');
   const hba = readServerFile('postgres', 'pg_hba.conf');
   res.json({
     logins: passwordOnlyLogins(),
+    tls_logins: tlsOnlyLogins(),
     cert_problems: certProblems(),
     postgres_strict: hba == null ? null : isStrictPgHba(hba),
   });
 });
 
 // It cuts off the app's new connections at once (and, for Mongo, removes the
-// password), so it takes a fresh sign-in (step-up) and an explicit
-// { "confirm": true } in the body.
-serversRouter.post('/logins/:id/require-certificate', requireAuth, requirePlatformAdmin, requireStepUp('security_settings'), async (req, res) => {
+// password), so it takes a dashboard session, a fresh sign-in (step-up) and
+// an explicit { "confirm": true } in the body.
+
+// The login-level changes take an interactive dashboard session: no user API
+// key, MCP key, OAuth token or agent, because requireStepUp lets a
+// platform-admin API key through without a step-up, and a leaked key must not
+// be able to take an app's database access away (or loosen it). The same
+// check as configArchiveGuard.requireArchiveSession.
+function requireSessionOnly(req, _res, next) {
+  if (req.auth_kind !== 'session') {
+    return next(new AppError('A database login\'s TLS level is changed only from a signed-in dashboard session, not with an API key, MCP key or agent.', 403, 'SESSION_REQUIRED'));
+  }
+  next();
+}
+
+async function catalogCaEnv(app) {
+  if (!app?.catalog_slug) return null;
+  const { findEntry } = await import('../services/catalogService.js');
+  return findEntry(app.catalog_slug)?.needs?.tls_ca_env || null;
+}
+serversRouter.post('/logins/:id/require-certificate', requireAuth, requirePlatformAdmin, requireSessionOnly, requireStepUp('security_settings'), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
   if (req.body?.confirm !== true) {
@@ -558,6 +585,99 @@ serversRouter.post('/logins/:id/require-certificate', requireAuth, requirePlatfo
       + (result.engine === 'mongo' ? ' (x509: no password). ' : ', as well as the password. ')
       + `Redeploy or restart ${app?.slug || 'the app'} to mount the certificate and get the TLS connection URL; `
       + 'until then the engine refuses its new connections.',
+  });
+});
+
+// Phase 2 of "TLS required" (Phase 1 is the deploy handing the app its CA,
+// managedDb.secureLogin prepareTls). Same gate as Require certificate, and a
+// dashboard session only. It goes ahead only when the engine shows every
+// measured connection of the login using TLS; with nothing to measure, only
+// with { "confirm_no_connections": true } as well.
+const TLS_CHECK_CODES = new Set(['TLS_CHECK_NOT_STARTED', 'TLS_CHECK_RESTARTED', 'TLS_PLAIN_CONNECTIONS', 'TLS_UNCLASSIFIED_CONNECTIONS', 'TLS_NO_CONNECTIONS']);
+serversRouter.post('/logins/:id/require-tls', requireAuth, requirePlatformAdmin, requireSessionOnly, requireStepUp('security_settings'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
+  if (req.body?.confirm !== true) {
+    throw new AppError('Send {"confirm": true}: requiring TLS refuses the app\'s new plain-text connections at once', 400, 'CONFIRMATION_REQUIRED');
+  }
+  const svc = await engineModule();
+  let result;
+  try {
+    result = await svc.requireTls(id, { confirmNoConnections: req.body?.confirm_no_connections === true });
+  } catch (err) {
+    if (err?.code === 'TLS_LEVEL_UNSUPPORTED') throw new AppError(err.message.replace(/^managedDb: /, ''), 400, 'TLS_LEVEL_UNSUPPORTED');
+    if (TLS_CHECK_CODES.has(err?.code)) {
+      const e = new AppError(err.message.replace(/^managedDb: /, ''), 409, err.code);
+      e.publicDetails = { check: err.check || null };
+      throw e;
+    }
+    rethrowEngineError(err);
+  }
+  if (!result) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
+  const app = getDb().prepare('SELECT slug, catalog_slug FROM apps WHERE id = ?').get(result.app_id);
+  logAudit(req.user.id, result.app_id, 'managed-db-require-tls', {
+    engine: result.engine, logins: result.logins, converted: result.converted, level: result.level,
+    confirm_no_connections: req.body?.confirm_no_connections === true,
+    check: result.check ? { method: result.check.method, connections: result.check.connections, tls: result.check.tls, plain: result.check.plain } : null,
+  });
+  const caEnv = await catalogCaEnv(app);
+  res.json({
+    ...result,
+    app_slug: app?.slug || null,
+    tls_ca_env: caEnv,
+    note: result.level === 'certificate'
+      ? `Nothing changed: ${result.logins.join(' and ')} already require TLS and their own client certificate, which is stronger.`
+      : `Done: ${result.logins.join(' and ')} now need TLS and the password (no client certificate). `
+        + 'The engine refuses their connections without TLS from now on. Revert to password undoes it.',
+  });
+});
+
+/**
+ * Whether the row's logins connect over TLS, from the engine
+ * (managedDb.measureLoginTls). Postgres: current connections. MariaDB: the
+ * connections since the check started; { "reset": true } starts it again.
+ */
+serversRouter.post('/logins/:id/tls-check', requireAuth, requirePlatformAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
+  const svc = await engineModule();
+  let check;
+  try {
+    check = await svc.measureLoginTls(id, { reset: req.body?.reset === true });
+  } catch (err) {
+    if (err?.code === 'TLS_LEVEL_UNSUPPORTED') throw new AppError(err.message.replace(/^managedDb: /, ''), 400, 'TLS_LEVEL_UNSUPPORTED');
+    rethrowEngineError(err);
+  }
+  if (!check) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
+  const { requireTlsRefusal } = await import('../services/managedDbTlsCheck.js');
+  const refusal = requireTlsRefusal(check, { confirmNoConnections: true });
+  res.json({ ...check, ready: !refusal && check.connections > 0, blocked: refusal ? { code: refusal.code, message: refusal.message } : null });
+});
+
+// The only way back from Require TLS (tls_required is otherwise sticky). It
+// loosens the engine, so the same gate as converting: platform admin, a
+// dashboard session, step-up, { "confirm": true }, audited.
+serversRouter.post('/logins/:id/revert-tls', requireAuth, requirePlatformAdmin, requireSessionOnly, requireStepUp('security_settings'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
+  if (req.body?.confirm !== true) {
+    throw new AppError('Send {"confirm": true}: reverting lets the login sign in with its password alone, without TLS, again', 400, 'CONFIRMATION_REQUIRED');
+  }
+  const svc = await engineModule();
+  let result;
+  try {
+    result = await svc.revertTls(id);
+  } catch (err) {
+    if (err?.code === 'TLS_LEVEL_UNSUPPORTED') throw new AppError(err.message.replace(/^managedDb: /, ''), 400, 'TLS_LEVEL_UNSUPPORTED');
+    rethrowEngineError(err);
+  }
+  if (!result) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
+  logAudit(req.user.id, result.app_id, 'managed-db-revert-tls', { engine: result.engine, logins: result.logins, reverted: result.reverted });
+  res.json({
+    ...result,
+    note: result.reverted
+      ? `Done: ${result.logins.join(' and ')} sign in with the password again, TLS optional. The app keeps working without a redeploy.`
+      : `Nothing changed: ${result.logins.join(' and ')} did not require TLS.`,
   });
 });
 

@@ -54,7 +54,7 @@ function assertBridgesFirst(numbered, bridges) {
   }
 }
 
-test('ufw: only scoped rules added (5001 and the DB ports denied on eth0, 5001 allowed on docker0 and the appcrane-apps bridge ahead of every deny); the global deny 5001 replaced in both families; default policy, INPUT policy and every other rule untouched; idempotent; a recreated network, a later admin deny and an unreachable Docker', { skip: skipNet(R) }, () => {
+test('ufw: only scoped rules added (5001 and the DB ports denied on eth0, the DB ports denied on docker0, 5001 allowed on docker0 and the appcrane-apps bridge ahead of every deny); the global deny 5001 replaced in both families; default policy, INPUT policy and every other rule untouched; idempotent; a recreated network, a later admin deny and an unreachable Docker', { skip: skipNet(R) }, () => {
   const out = runNet(R, `
     ${FAKE_DOCKER}
     ufw allow proto tcp from 10.0.0.0/8 to any port 22 >/dev/null
@@ -81,8 +81,11 @@ test('ufw: only scoped rules added (5001 and the DB ports denied on eth0, 5001 a
     rm /tmp/net-bridge
     hh
     echo @@ADDED5; ufw show added
+    printf "DATA_DIR=/opt/appcrane/data\\nMANAGED_DB_POSTGRES_PORT=55432\\n" > /opt/appcrane/.env
+    hh
+    echo @@ADDED6; ufw show added
   `);
-  assert.deepEqual(exits(out), [0, 0, 0, 0, 0], out);
+  assert.deepEqual(exits(out), [0, 0, 0, 0, 0, 0], out);
   const before = added(out, 'BEFORE');
   const a1 = added(out, 'ADDED1');
   assert.deepEqual(a1.filter((l) => before.includes(l)), before.filter((l) => l !== 'ufw deny 5001'), 'other rules kept, in order');
@@ -91,6 +94,7 @@ test('ufw: only scoped rules added (5001 and the DB ports denied on eth0, 5001 a
   assert.deepEqual(a1.filter((l) => !before.includes(l)).sort(), [
     ...bridges.map((b) => `ufw allow in on ${b} to any port 5001 proto tcp comment 'appcrane-bridge'`),
     ...EXT.map((p) => `ufw deny in on eth0 to any port ${p.replace('/tcp', ' proto tcp')} comment 'appcrane-ext'`),
+    ...EXT.slice(1).map((p) => `ufw deny in on docker0 to any port ${p.replace('/tcp', ' proto tcp')} comment 'appcrane-db'`),
   ].sort());
   assert.ok(!a1.some((l) => /^ufw allow (22|80|443)\//.test(l)), 'no 22, 80 or 443 allow added');
   const n1 = block(out, 'NUM1');
@@ -119,6 +123,10 @@ test('ufw: only scoped rules added (5001 and the DB ports denied on eth0, 5001 a
 
   assert.match(out, /Docker could not be asked for its bridges — ufw bridge allows left as they are/);
   assert.equal(added(out, 'ADDED5').filter((l) => /appcrane-bridge/.test(l)).length, 2, 'Docker down: the bridge allows are kept');
+  const a6 = added(out, 'ADDED6').filter((l) => /appcrane-db/.test(l));
+  assert.deepEqual(a6.sort(), ['55432', '43306', '47017', '46379:46878'].map((p) => `ufw deny in on docker0 to any port ${p} proto tcp comment 'appcrane-db'`).sort(),
+    'a database port AppCrane no longer uses loses its docker0 deny');
+  assert.match(out, /ufw rule no longer AppCrane's deleted: deny in on docker0 to any port 45432 proto tcp/);
 });
 
 test('ufw packets: with a global deny 5001 a container on the appcrane-apps bridge cannot reach AppCrane (the production failure); after Apply it can, while 5001 stays closed from the public interface and an admin-allowed UDP 41641 still answers', { skip: skipNet(R) }, () => {
@@ -127,6 +135,7 @@ test('ufw packets: with a global deny 5001 a container on the appcrane-apps brid
   const box = `appcrane-test-hnu-box-${id}`;
   const dk = (...a) => execFileSync('docker', a, { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] });
   const fromBridge = () => dk('exec', box, 'bash', '-c', 'ip netns exec c1 nc -z -w 2 172.30.0.1 5001 && echo open || echo closed');
+  const fromDocker0 = () => dk('exec', box, 'bash', '-c', 'ip netns exec c0 nc -z -w 2 10.117.0.1 45432 && echo open || echo closed');
   const fromExt = () => dk('run', '--rm', '--network', net, netImages[R], 'bash', '-c',
     `nc -z -w 2 ${box} 5001 && echo "5001 open" || echo "5001 closed"; echo "udp-ext" | nc -u -w 1 ${box} 41641`);
   try {
@@ -138,11 +147,19 @@ test('ufw packets: with a global deny 5001 a container on the appcrane-apps brid
       ip netns add c1 && ip link add veth-h type veth peer name veth-c && ip link set veth-c netns c1
       ip link set veth-h master br-a2d101c04cff && ip link set veth-h up
       ip netns exec c1 ip addr add 172.30.0.2/24 dev veth-c && ip netns exec c1 ip link set veth-c up && ip netns exec c1 ip link set lo up
+      ip link add docker0 type bridge && ip addr add 10.117.0.1/24 dev docker0 && ip link set docker0 up
+      ip netns add c0 && ip link add veth0-h type veth peer name veth0-c && ip link set veth0-c netns c0
+      ip link set veth0-h master docker0 && ip link set veth0-h up
+      ip netns exec c0 ip addr add 10.117.0.3/24 dev veth0-c && ip netns exec c0 ip link set veth0-c up
+      setsid nc -lk 10.117.0.1 45432 >/dev/null 2>&1 < /dev/null &
+      ufw allow in on docker0 >/dev/null
       ufw allow 41641/udp >/dev/null; ufw deny 5001 >/dev/null; ufw --force enable >/dev/null`);
     assert.equal(fromBridge(), 'closed\n', 'reproduced: global deny 5001 + default deny incoming cut containers off');
+    assert.equal(fromDocker0(), 'open\n', 'reproduced: with docker0 allowed in, a default-bridge container reaches a database port on the gateway (docker-proxy, INPUT)');
     const log = dk('exec', '-e', 'APPCRANE_RESERVE_MIN_FREE_GB=100000', box, 'bash', '-c', 'bash /opt/appcrane/scripts/host-hardening.sh 2>&1; echo "@@EXIT $?"');
     assert.deepEqual(exits(log), [0], log);
     assert.equal(fromBridge(), 'open\n', 'a container on the appcrane-apps bridge reaches AppCrane');
+    assert.equal(fromDocker0(), 'closed\n', 'the appcrane-db deny on docker0 goes ahead of the admin allow');
     assert.equal(fromExt(), '5001 closed\n');
     assert.match(dk('exec', box, 'cat', '/tmp/udp.log'), /udp-ext\n/, 'the admin-allowed UDP listener still receives');
   } finally {

@@ -429,10 +429,20 @@ test('restore-database from an export: platform admin only, and the member is de
   // stopping the app around a restore is test/managed-db-restore-stop.test.js.
   const body = { archive: 'full.tar.gz', app: 'bk-a', env: 'production', engine: 'postgres', keep_running: true };
   assert.equal((await call('POST', '/api/settings/backup/restore-database', OWNER, body)).status, 403);
+  // v2.147.0: a production restore takes the platform_archive step-up; an admin
+  // API key needs a grant its person made from a dashboard session.
+  const refused = await call('POST', '/api/settings/backup/restore-database', PLATFORM, body);
+  assert.equal(refused.status, 403, 'an admin API key restored a production database without a step-up grant');
+  assert.equal(refused.body.error.code, 'STEP_UP_REQUIRED');
+  assert.equal(refused.body.error.step_up.action, 'platform_archive');
+  const { createGrant } = await import('../server/services/stepUp.js');
+  const grant = createGrant(db, PLATFORM.id, 'platform_archive');
   const r = await call('POST', '/api/settings/backup/restore-database', PLATFORM, body);
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.db_name, nA.database);
+  const { revokeGrant } = await import('../server/services/stepUp.js');
+  revokeGrant(db, PLATFORM.id, grant.id);
   const sandbox = await call('POST', '/api/settings/backup/restore-database', PLATFORM, { ...body, env: 'sandbox' });
-  assert.equal(sandbox.status, 200);
+  assert.equal(sandbox.status, 200, 'a sandbox restore needs only the admin key');
   assert.equal(sandbox.body.db_name, nAs.database);
 });

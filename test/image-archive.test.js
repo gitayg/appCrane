@@ -367,9 +367,9 @@ const { errorHandler } = await import('../server/utils/errors.js');
 
 function mkUser(name, role) {
   const key = generateApiKey('dhk_user');
-  db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES (?,?,?,?,1,'human')")
-    .run(name, `${name}@t.test`, role, hashApiKey(key));
-  return { key };
+  const id = db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES (?,?,?,?,1,'human')")
+    .run(name, `${name}@t.test`, role, hashApiKey(key)).lastInsertRowid;
+  return { id, key };
 }
 const ADMIN = mkUser('imgadmin', 'platform_admin');
 const PLAIN = mkUser('imgplain', 'user');
@@ -406,6 +406,14 @@ test('the image-archive routes are platform-admin only', async (t) => {
 test('import refuses a path outside the backups directory', async (t) => {
   if (noDocker) return t.skip(noDocker);
   const { archiveDir } = await import('../server/services/imageArchive.js');
+  // v2.147.0: loading images takes the platform_archive step-up. An admin API
+  // key alone is refused; one holding a grant its person made gets through.
+  const noGrant = await call(ADMIN, 'POST', '/api/settings/images/import', { path: 'x.tar' });
+  assert.equal(noGrant.status, 403, 'an admin API key loaded images without a step-up grant');
+  assert.equal(noGrant.body.error.code, 'STEP_UP_REQUIRED');
+  assert.equal(noGrant.body.error.step_up.action, 'platform_archive');
+  const { createGrant } = await import('../server/services/stepUp.js');
+  createGrant(db, ADMIN.id, 'platform_archive');
   for (const bad of ['/etc/passwd', `${archiveDir()}/../../../etc/passwd`]) {
     const res = await call(ADMIN, 'POST', '/api/settings/images/import', { path: bad });
     assert.equal(res.status, 400, `must refuse ${bad}`);

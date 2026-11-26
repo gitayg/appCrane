@@ -343,9 +343,14 @@ test('not-a-backup inputs are refused with a reason', async () => {
 const { generateApiKey, hashApiKey } = await import('../server/services/encryption.js');
 function mkUser(name, role) {
   const key = generateApiKey('dhk_user');
-  db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES (?,?,?,?,1,'human')").run(name, `${name}@t.test`, role, hashApiKey(key));
-  return { key };
+  const id = db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES (?,?,?,?,1,'human')").run(name, `${name}@t.test`, role, hashApiKey(key)).lastInsertRowid;
+  // Platform archives take a freshly signed-in dashboard session (v2.147.0).
+  const session = generateApiKey('sess');
+  db.prepare("INSERT INTO identity_sessions (user_id, token_hash, expires_at) VALUES (?, ?, datetime('now', '+1 day'))").run(id, hashApiKey(session));
+  return { key, session: { Authorization: `Bearer ${session}` } };
 }
+const { instanceName } = await import('../server/services/configArchiveGuard.js');
+const CONFIRM = encodeURIComponent(instanceName());
 const admin = mkUser('bkadmin', 'platform_admin');
 const plain = mkUser('bkuser', 'user');
 const settingsRoutes = (await import('../server/routes/settings.js')).default;
@@ -360,10 +365,10 @@ after(() => { server.closeAllConnections?.(); server.unref(); server.close(); })
 
 test('routes: download is a streamed tar.gz that imports; upload is streamed to disk and removed; non-admins refused', async () => {
   setSetting('route_marker', 'IN-DOWNLOAD');
-  const refused = await fetch(`${BASE}/api/settings/config/export`, { headers: { 'X-API-Key': plain.key } });
+  const refused = await fetch(`${BASE}/api/settings/config/export`, { headers: plain.session });
   assert.equal(refused.status, 403);
 
-  const dl = await fetch(`${BASE}/api/settings/config/export`, { headers: { 'X-API-Key': admin.key } });
+  const dl = await fetch(`${BASE}/api/settings/config/export`, { headers: admin.session });
   assert.equal(dl.status, 200);
   assert.equal(dl.headers.get('content-type'), 'application/gzip');
   assert.match(dl.headers.get('content-disposition'), /filename="appcrane-backup-.*\.tar\.gz"/);
@@ -375,7 +380,7 @@ test('routes: download is a streamed tar.gz that imports; upload is streamed to 
   setSetting('route_marker', 'CHANGED');
   const fd = new FormData();
   fd.append('file', new Blob([body]), 'backup.tar.gz');
-  const up = await fetch(`${BASE}/api/settings/config/import?restore_env=0`, { method: 'POST', headers: { 'X-API-Key': admin.key }, body: fd });
+  const up = await fetch(`${BASE}/api/settings/config/import?restore_env=0&confirm=${CONFIRM}`, { method: 'POST', headers: admin.session, body: fd });
   const upBody = await up.json();
   assert.equal(up.status, 200, JSON.stringify(upBody));
   assert.equal(upBody.format, 'tar.gz');
@@ -386,8 +391,8 @@ test('routes: download is a streamed tar.gz that imports; upload is streamed to 
 test('routes: path import is confined to DATA_DIR/backups; an upload larger than free disk is refused before it is read', async () => {
   const outside = join(OUTSIDE, 'elsewhere.tar.gz');
   writeFileSync(outside, 'x');
-  const r1 = await fetch(`${BASE}/api/settings/config/import`, {
-    method: 'POST', headers: { 'X-API-Key': admin.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: outside }),
+  const r1 = await fetch(`${BASE}/api/settings/config/import?confirm=${CONFIRM}`, {
+    method: 'POST', headers: { ...admin.session, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: outside }),
   });
   assert.equal(r1.status, 400);
   assert.match((await r1.json()).error.message, /must be inside/);
@@ -398,9 +403,9 @@ test('routes: path import is confined to DATA_DIR/backups; an upload larger than
   assert.equal(r2.status, 400);
 
   const status = await new Promise((resolve, reject) => {
-    const req = http.request(`${BASE}/api/settings/config/import`, {
+    const req = http.request(`${BASE}/api/settings/config/import?confirm=${CONFIRM}`, {
       method: 'POST',
-      headers: { 'X-API-Key': admin.key, 'Content-Type': 'multipart/form-data; boundary=zzz', 'Content-Length': String(2 ** 50) },
+      headers: { ...admin.session, 'Content-Type': 'multipart/form-data; boundary=zzz', 'Content-Length': String(2 ** 50) },
     }, (res) => { res.resume(); resolve(res.statusCode); req.destroy(); });
     // Without the up-front check the upload is accepted and waits for a body
     // that never comes; fail with that, not with a whole-file timeout.

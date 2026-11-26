@@ -308,12 +308,13 @@ describe('a real deploy reads the column', () => {
     for (const s of servers) { s.closeAllConnections?.(); s.unref(); s.close(); }
   });
 
-  async function deployWith(slug, containerCommand) {
+  async function deployWith(slug, containerCommand, setup = () => {}) {
     db.prepare(
       'INSERT INTO apps (name,slug,slot,source_type,image_ref,container_port,health_path,container_command) ' +
       "VALUES (?,?,?,'image','kc:26',3000,?,?)",
     ).run(slug, slug, slot, HEALTH, containerCommand);
     const app = db.prepare('SELECT * FROM apps WHERE slug = ?').get(slug);
+    setup(app);
     const depId = db.prepare(
       "INSERT INTO deployments (app_id, env, status, deployed_by) VALUES (?, 'sandbox', 'pending', ?)",
     ).run(app.id, userId).lastInsertRowid;
@@ -337,6 +338,18 @@ describe('a real deploy reads the column', () => {
     const { args, row } = await deployWith('cmd-row-null', null);
     assert.equal(row.status, 'live', row.log);
     assert.deepEqual(trailingArgv(args, `kc@${DIGEST}`), []);
+  });
+
+  // APPCRANE-DB reads the scope a container was started in from this label
+  // (hostFirewall/dbDesired.js), not from the current setting.
+  test('the run carries the database scope it was started in: shared, or the sandbox scope under Separate sandbox database', async () => {
+    const label = (args) => args.filter((a, i) => args[i - 1] === '--label' && a.startsWith('appcrane.db-scope'));
+    const shared = await deployWith('cmd-scope-shared', null);
+    assert.equal(shared.row.status, 'live', shared.row.log);
+    assert.deepEqual(label(shared.args), ['appcrane.db-scope=']);
+    const sep = await deployWith('cmd-scope-sep', null, (app) => db.prepare('INSERT INTO app_settings (app_id, separate_sandbox_db) VALUES (?, 1)').run(app.id));
+    assert.equal(sep.row.status, 'live', sep.row.log);
+    assert.deepEqual(label(sep.args), ['appcrane.db-scope=env:sandbox']);
   });
 
   test('a corrupt column does not take the app down with it', async () => {

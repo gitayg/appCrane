@@ -21,6 +21,8 @@ process.env.LOG_LEVEL = 'error';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_SRC = readFileSync(join(ROOT, 'scripts', 'host-hardening.sh'), 'utf8');
+const PUB_SRC = readFileSync(join(ROOT, 'scripts', 'appcrane-publish-chain.sh'), 'utf8');
+const DB_SRC = readFileSync(join(ROOT, 'scripts', 'appcrane-db-chain.sh'), 'utf8');
 
 const { initDb, getDb } = await import('../server/db.js');
 const { hashApiKey } = await import('../server/services/encryption.js');
@@ -55,6 +57,8 @@ const HARDENED = {
     '/etc/docker/daemon.json': '{"log-opts":{"max-size":"10m","max-file":"3"}}\n',
     '/etc/passwd': 'root:x:0:0:root:/root:/bin/bash\ncaddy:x:998:998::/var/lib/caddy:/usr/sbin/nologin\n',
     [`${REPO}/scripts/host-hardening.sh`]: REPO_SRC,
+    [`${REPO}/scripts/appcrane-publish-chain.sh`]: PUB_SRC,
+    [`${REPO}/scripts/appcrane-db-chain.sh`]: DB_SRC,
     '/var/lib/appcrane/host-network.state': '# Written by AppCrane scripts/host-hardening.sh\napplied_at=2026-11-25T06:08:17Z\nresult=ok\next=eth0\nfamilies=IPv4+IPv6\ninput_mode=appcrane-input\ninput_policy=DROP\nallow=22/tcp 80/tcp 443/tcp 443/udp\napp_port=5001\nuncovered=\nrun_user=root\ndocker_user=skeleton\npublish_drop=yes\npublish_drop_reason=\n',
   },
   dirs: {
@@ -115,7 +119,9 @@ function host(over = {}, { uid = 1000, platform = 'linux', spawn } = {}) {
 
 const item = (items, id) => items.find((i) => i.id === id);
 const installedCopy = H.expectedInstalledCopy(REPO_SRC, REPO);
-const SUDO_FILES = { [H.INSTALLED_SCRIPT]: installedCopy };
+const PUB_COPY = '/usr/local/lib/appcrane/appcrane-publish-chain.sh';
+const DB_COPY = '/usr/local/lib/appcrane/appcrane-db-chain.sh';
+const SUDO_FILES = { [H.INSTALLED_SCRIPT]: installedCopy, [PUB_COPY]: PUB_SRC, [DB_COPY]: DB_SRC };
 
 // ---- status ----
 
@@ -308,6 +314,18 @@ test('mode: an installed copy that differs from the repo script is stale, with t
   assert.notEqual(r.setup_command, r.command, 'the refresh command is not the Apply command');
   const moved = await H.detectRunMode({ ...host({ files: { [H.INSTALLED_SCRIPT]: H.expectedInstalledCopy(REPO_SRC, '/old/path') } }).deps });
   assert.equal(moved.installed_copy_stale, true, 'a copy baked for another repo path is stale');
+});
+
+test('mode: a root-owned helper that differs from the checkout, or is missing, makes the installed copy stale', async () => {
+  for (const [name, files] of [
+    ['old database-chain helper', { ...SUDO_FILES, [DB_COPY]: DB_SRC.replace('10/min', '6/min') }],
+    ['old publish-chain helper', { ...SUDO_FILES, [PUB_COPY]: `${PUB_SRC}# old\n` }],
+    ['no database-chain helper', { ...SUDO_FILES, [DB_COPY]: null }],
+  ]) {
+    const r = await H.detectRunMode(host({ files }).deps);
+    assert.equal(r.mode, 'sudo', name);
+    assert.equal(r.installed_copy_stale, true, name);
+  }
 });
 
 test('mode: non-root without the sudo rule (or without the copy) is manual, with the command', async () => {

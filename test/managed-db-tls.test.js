@@ -96,8 +96,11 @@ test('pg_hba: cert group needs TLS + client cert + password, plain is rejected, 
     'members must present a CA-signed cert whose CN is the login AND the password');
   assert.deepEqual(lines[2], ['host', 'all', `+${tls.PG_CERT_GROUP}`, 'all', 'reject'],
     'a member connecting without TLS must be rejected before the generic line');
-  assert.deepEqual(lines[3], ['host', 'all', 'all', 'all', 'scram-sha-256']);
-  assert.equal(lines.length, 4);
+  assert.deepEqual(lines[3], ['hostssl', 'all', `+${tls.PG_TLS_GROUP}`, 'all', 'scram-sha-256'],
+    'TLS-group members: TLS and the password, no certificate; after the cert lines so a member of both needs the certificate');
+  assert.deepEqual(lines[4], ['host', 'all', `+${tls.PG_TLS_GROUP}`, 'all', 'reject']);
+  assert.deepEqual(lines[5], ['host', 'all', 'all', 'all', 'scram-sha-256']);
+  assert.equal(lines.length, 6);
   assert.ok(!tls.pgHbaConf().includes('127.0.0.1/32'), 'the image default "host all all 127.0.0.1/32 trust" must not come back');
 });
 

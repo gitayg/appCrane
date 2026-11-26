@@ -22,6 +22,11 @@
 # publishes through it. host-hardening.sh closes the public interface in
 # DOCKER-USER only when AppCrane runs as root or this rule is in place.
 #
+# Likewise scripts/appcrane-db-chain.sh goes to
+# /usr/local/lib/appcrane/appcrane-db-chain.sh with a third sudoers rule for
+# exactly that path: AppCrane keeps the APPCRANE-DB chain (which app containers
+# may reach which managed database port) in step with the databases it hands out.
+#
 # run-user defaults to the User= of appcrane.service, then $SUDO_USER, then root.
 # A root run user needs no sudoers rule, so none is written.
 
@@ -41,6 +46,9 @@ SUDOERS_FILE=/etc/sudoers.d/appcrane-host-hardening
 PUB_SRC="$REPO_DIR/scripts/appcrane-publish-chain.sh"
 PUB_DEST="$DEST_DIR/appcrane-publish-chain.sh"
 PUB_SUDOERS_FILE=/etc/sudoers.d/appcrane-publish-chain
+DB_SRC="$REPO_DIR/scripts/appcrane-db-chain.sh"
+DB_DEST="$DEST_DIR/appcrane-db-chain.sh"
+DB_SUDOERS_FILE=/etc/sudoers.d/appcrane-db-chain
 
 RUN_USER="${1:-}"
 if [[ -z "$RUN_USER" ]] && [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
@@ -50,6 +58,7 @@ RUN_USER="${RUN_USER:-${SUDO_USER:-root}}"
 
 [[ -f "$SRC" ]] || die "$SRC not found"
 [[ -f "$PUB_SRC" ]] || die "$PUB_SRC not found"
+[[ -f "$DB_SRC" ]] || die "$DB_SRC not found"
 [[ "$REPO_DIR" != *"'"* ]] || die "Repo path contains a single quote: $REPO_DIR"
 [[ "$RUN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "Not a valid user name: $RUN_USER"
 id -u "$RUN_USER" >/dev/null 2>&1 || die "User does not exist: $RUN_USER"
@@ -73,24 +82,34 @@ chmod 0755 "$_tmp"
 mv -f "$_tmp" "$DEST"
 log "host-hardening: installed $DEST (root:root 0755, repo $REPO_DIR)"
 
-# Version stamp: AppCrane runs the installed copy by itself after an upgrade
-# only when source_sha256 equals the sha256 of the checkout's script.
-STAMP="$DEST_DIR/host-hardening.version"
-_ver="$(grep -m1 -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$REPO_DIR/package.json" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
-_tmp="$(mktemp "$DEST_DIR/.host-hardening-version.XXXXXX")"
-printf 'version=%s\nsource_sha256=%s\ninstalled_sha256=%s\n' \
-  "${_ver:-unknown}" "$(sha256sum "$_src" | cut -d' ' -f1)" "$(sha256sum "$DEST" | cut -d' ' -f1)" > "$_tmp"
-rm -f "$_src"
-chown root:root "$_tmp"
-chmod 0644 "$_tmp"
-mv -f "$_tmp" "$STAMP"
-log "host-hardening: stamped $STAMP (AppCrane ${_ver:-unknown})"
 _tmp="$(mktemp "$DEST_DIR/.appcrane-publish-chain.XXXXXX")"
 cat "$PUB_SRC" > "$_tmp"
 chown root:root "$_tmp"
 chmod 0755 "$_tmp"
 mv -f "$_tmp" "$PUB_DEST"
 log "host-hardening: installed $PUB_DEST (root:root 0755)"
+_tmp="$(mktemp "$DEST_DIR/.appcrane-db-chain.XXXXXX")"
+cat "$DB_SRC" > "$_tmp"
+chown root:root "$_tmp"
+chmod 0755 "$_tmp"
+mv -f "$_tmp" "$DB_DEST"
+log "host-hardening: installed $DB_DEST (root:root 0755)"
+
+# Version stamp, written last: AppCrane runs the installed copy by itself after
+# an upgrade only when source_sha256 equals the sha256 of the checkout's script
+# and publish_chain_sha256 / db_chain_sha256 those of its two helpers (copied
+# byte for byte), so a release that changes only a helper is flagged stale too.
+STAMP="$DEST_DIR/host-hardening.version"
+_ver="$(grep -m1 -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$REPO_DIR/package.json" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+_tmp="$(mktemp "$DEST_DIR/.host-hardening-version.XXXXXX")"
+printf 'version=%s\nsource_sha256=%s\ninstalled_sha256=%s\npublish_chain_sha256=%s\ndb_chain_sha256=%s\n' \
+  "${_ver:-unknown}" "$(sha256sum "$_src" | cut -d' ' -f1)" "$(sha256sum "$DEST" | cut -d' ' -f1)" \
+  "$(sha256sum "$PUB_DEST" | cut -d' ' -f1)" "$(sha256sum "$DB_DEST" | cut -d' ' -f1)" > "$_tmp"
+rm -f "$_src"
+chown root:root "$_tmp"
+chmod 0644 "$_tmp"
+mv -f "$_tmp" "$STAMP"
+log "host-hardening: stamped $STAMP (AppCrane ${_ver:-unknown})"
 
 if [[ "$RUN_USER" == root ]]; then
   log "host-hardening: AppCrane runs as root — no sudoers rule needed"
@@ -126,3 +145,17 @@ if ! visudo -cf "$_tmp" >/dev/null; then
 fi
 mv -f "$_tmp" "$PUB_SUDOERS_FILE"
 log "host-hardening: sudoers written: $PUB_SUDOERS_FILE ($RUN_USER may run $PUB_DEST)"
+
+_tmp="$(mktemp /etc/sudoers.d/.appcrane-db-chain.XXXXXX)"
+cat > "$_tmp" <<SUDOERS
+# Written by AppCrane scripts/install-host-hardening.sh
+# Lets ${RUN_USER} set the APPCRANE-DB chain; the script accepts only allow:<port>:<address> and close:<port> arguments.
+${RUN_USER} ALL=(root) NOPASSWD: ${DB_DEST}
+SUDOERS
+chown root:root "$_tmp"
+chmod 0440 "$_tmp"
+if ! visudo -cf "$_tmp" >/dev/null; then
+  rm -f "$_tmp"; die "Generated sudoers rule is invalid — $DB_SUDOERS_FILE not written"
+fi
+mv -f "$_tmp" "$DB_SUDOERS_FILE"
+log "host-hardening: sudoers written: $DB_SUDOERS_FILE ($RUN_USER may run $DB_DEST)"

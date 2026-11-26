@@ -10,9 +10,11 @@
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { readFileSync, readdirSync, statSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { basename, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { DEFAULT_DEPS as VULN_DEPS, unattended } from './hostVulns.js';
+import { HELPER } from './hostFirewall/rules.js';
+import { DB_HELPER } from './hostFirewall/dbRules.js';
 
 export const INSTALLED_SCRIPT = '/usr/local/lib/appcrane/host-hardening.sh';
 export const SUDOERS_FILE = '/etc/sudoers.d/appcrane-host-hardening';
@@ -386,7 +388,12 @@ export async function detectRunMode(deps = {}) {
     };
   }
   const repo = readState(d, repoScript);
-  const stale = repo.text == null || sha256(installed.text) !== sha256(expectedInstalledCopy(repo.text, d.repoDir));
+  const helperStale = [HELPER, DB_HELPER].some((p) => {
+    const copy = readState(d, p).text;
+    const src = readState(d, join(d.repoDir, 'scripts', basename(p))).text;
+    return copy == null || src == null || sha256(copy) !== sha256(src);
+  });
+  const stale = repo.text == null || sha256(installed.text) !== sha256(expectedInstalledCopy(repo.text, d.repoDir)) || helperStale;
   const allowed = await d.exec('sudo', ['-n', '-l', INSTALLED_SCRIPT]);
   if (allowed.code !== 0) {
     return {

@@ -15,7 +15,8 @@ import { accessSync, statSync, constants as fsConstants } from 'fs';
 import psl from 'psl';
 import log from '../utils/logger.js';
 import { logAudit } from '../middleware/audit.js';
-import { ownedSettingRoute } from '../services/settingsOwnedKeys.js';
+import { ownedSettingRoute, protectedSetting } from '../services/settingsOwnedKeys.js';
+import { requireArchiveSession, requireArchiveStepUp, instanceName, confirmMatches, sha256File, liveKeyFingerprint, keyAuditFields, recordInRestoredDb } from '../services/configArchiveGuard.js';
 
 const router = Router();
 
@@ -218,7 +219,14 @@ const finishJob = (job, p) => p
 // Browser download (the Settings page). Written to a private temp file, piped
 // to the response, deleted when the response ends — the backups directory is
 // not left holding a key-bearing file nobody asked to keep.
-router.get('/config/export', requireAuth, requirePlatformAdmin, async (req, res) => {
+const archiveGate = [requireAuth, requirePlatformAdmin, requireArchiveSession, requireArchiveStepUp];
+const archiveActor = (req) => req.real_user || req.user;
+const archiveIp = (req) => req.ip || req.socket?.remoteAddress || 'unknown';
+
+// The name an import must repeat in `confirm` (the Settings page shows it).
+router.get('/config/instance', requireAuth, requirePlatformAdmin, (req, res) => res.json({ instance: instanceName() }));
+
+router.get('/config/export', ...archiveGate, async (req, res) => {
   const { exportDataArchive } = await import('../services/configBackup.js');
   const { newWorkDir } = await import('../services/backupFiles.js');
   const { createReadStream } = await import('fs');
@@ -235,8 +243,12 @@ router.get('/config/export', requireAuth, requirePlatformAdmin, async (req, res)
     out.file = dataArchiveFileName(host, out.manifest.image_set?.fingerprint, at);
   } catch (e) {
     await cleanup();
+    logAudit(archiveActor(req).id, null, 'config-export-failed', { kind: 'download', ip: archiveIp(req), error: e.message });
     return res.status(e.status || 500).json({ error: { code: 'EXPORT_FAILED', message: e.message } });
   }
+  logAudit(archiveActor(req).id, null, 'config-export', {
+    kind: 'download', ip: archiveIp(req), file: out.file, bytes: out.bytes, sha256: await sha256File(out.path), encryption_key: liveKeyFingerprint(),
+  });
   res.setHeader('Content-Type', 'application/gzip');
   res.setHeader('Content-Disposition', `attachment; filename="${out.file}"`);
   res.setHeader('Content-Length', out.bytes);
@@ -246,16 +258,25 @@ router.get('/config/export', requireAuth, requirePlatformAdmin, async (req, res)
 });
 
 // On-host export, kept in DATA_DIR/backups. Returns a job; poll GET /config/export/:id.
-router.post('/config/export', requireAuth, requirePlatformAdmin, async (req, res) => {
+router.post('/config/export', ...archiveGate, async (req, res) => {
   const { exportDataArchive } = await import('../services/configBackup.js');
-  const job = await newBackupJob('data-export', {});
-  finishJob(job, exportDataArchive({ force: !!(req.body || {}).force }));
+  const who = archiveActor(req);
+  const ip = archiveIp(req);
+  const job = await newBackupJob('data-export', { user_id: who.id });
+  logAudit(who.id, null, 'config-export-started', { kind: 'on-host', ip, job: job.id.slice(0, 8) });
+  finishJob(job, exportDataArchive({ force: !!(req.body || {}).force }).then(async (r) => {
+    logAudit(who.id, null, 'config-export', { kind: 'on-host', ip, file: r.file, bytes: r.bytes, sha256: await sha256File(r.path), encryption_key: liveKeyFingerprint() });
+    return r;
+  }, (e) => {
+    logAudit(who.id, null, 'config-export-failed', { kind: 'on-host', ip, error: e.message });
+    throw e;
+  }));
   res.status(202).json({ job_id: job.id, state: job.state });
 });
 
-router.get('/config/export/:id', requireAuth, requirePlatformAdmin, (req, res) => {
+router.get('/config/export/:id', ...archiveGate, (req, res) => {
   const job = backupJobs.get(req.params.id);
-  if (!job || job.kind !== 'data-export') return res.status(404).json({ error: { code: 'NO_SUCH_JOB', message: 'Unknown export job' } });
+  if (!job || job.kind !== 'data-export' || job.user_id !== archiveActor(req).id) return res.status(404).json({ error: { code: 'NO_SUCH_JOB', message: 'Unknown export job' } });
   const r = job.result ? { path: job.result.path, file: job.result.file, bytes: job.result.bytes, warnings: job.result.warnings, manifest: job.result.manifest } : null;
   res.json({ job_id: job.id, state: job.state, started_at: job.started_at, finished_at: job.finished_at || null, result: r, error: job.error });
 });
@@ -411,7 +432,10 @@ router.get('/images/export/:id', requireAuth, requirePlatformAdmin, async (req, 
 // which is the exact failure the separate artifact exists to avoid. The path is
 // confined to the backups directory so an admin cannot make the daemon read an
 // arbitrary file through this route.
-router.post('/images/import', requireAuth, requirePlatformAdmin, async (req, res) => {
+// Loading images puts code on this host that the next start of an app runs,
+// so it takes the platform_archive step-up (a fresh session, or an API key
+// holding a grant) and is audited before and after.
+router.post('/images/import', requireAuth, requirePlatformAdmin, requireStepUp('platform_archive'), async (req, res) => {
   const { importImageArchive, archiveDir, verifyImageSet } = await import('../services/imageArchive.js');
   const { resolve, join, basename } = await import('path');
   const raw = String((req.body || {}).path || '').trim();
@@ -424,9 +448,16 @@ router.post('/images/import', requireAuth, requirePlatformAdmin, async (req, res
       error: { code: 'VALIDATION', message: `archive must be inside ${dir} (got ${basename(abs)} elsewhere)` },
     });
   }
+  const who = archiveActor(req);
+  const audit = { ip: archiveIp(req), via: req.auth_kind || null, file: basename(abs) };
+  logAudit(who.id, null, 'images-import-started', audit);
   try {
     const loadResult = await importImageArchive(abs);
     const verification = await verifyImageSet('live');
+    logAudit(who.id, null, 'images-import', {
+      ...audit, loaded: loadResult.loaded.length, unnamed: loadResult.unnamed.length, fingerprint: loadResult.fingerprint,
+      expected_fingerprint: verification.expected_fingerprint, present_fingerprint: verification.present_fingerprint,
+    });
     res.json({
       ...loadResult,
       verification: {
@@ -439,6 +470,7 @@ router.post('/images/import', requireAuth, requirePlatformAdmin, async (req, res
       },
     });
   } catch (e) {
+    logAudit(who.id, null, 'images-import-failed', { ...audit, error: e.message });
     res.status(400).json({ error: { code: 'IMPORT_FAILED', message: e.message } });
   }
 });
@@ -564,20 +596,36 @@ router.post('/backup/s3/backups/:id/fetch', requireAuth, requirePlatformAdmin, a
 
 // One-step restore: fetch + verify, then the same importers as /config/import
 // and /repos/import. Destructive, so the body must repeat the backup id.
-router.post('/backup/s3/backups/:id/restore', requireAuth, requirePlatformAdmin, async (req, res) => {
+router.post('/backup/s3/backups/:id/restore', ...archiveGate, async (req, res) => {
   const { restoreS3Backup } = await import('../services/backupScheduler.js');
-  const { logAudit } = await import('../middleware/audit.js');
-  if ((req.body || {}).confirm !== req.params.id) {
+  const who = archiveActor(req);
+  const ip = archiveIp(req);
+  const body = req.body || {};
+  if (body.confirm !== req.params.id) {
     return res.status(400).json({ error: { code: 'CONFIRM_REQUIRED', message: 'Type the backup id into confirm to restore it' } });
   }
+  if (!confirmMatches(body.instance)) {
+    logAudit(who.id, null, 'backup-s3-restore-refused', { ip, backup: req.params.id, reason: 'instance', instance: typeof body.instance === 'string' ? body.instance.slice(0, 200) : null });
+    return res.status(400).json({ error: { code: 'CONFIRM_REQUIRED', message: `Type this instance's name (${instanceName()}) into instance to restore a backup over it`, instance: instanceName() } });
+  }
+  const base = { ip, backup: req.params.id, actor: { id: who.id, name: who.name || null, email: who.email || null } };
+  const keyBefore = liveKeyFingerprint();
+  logAudit(who.id, null, 'backup-s3-restore-started', { ...base, encryption_key: keyBefore });
   let r;
   try {
     r = await restoreS3Backup(req.params.id);
   } catch (e) {
+    logAudit(who.id, null, 'backup-s3-restore-failed', { ...base, error: e.message });
     return res.status(e.status || 400).json({ error: { code: 'S3_RESTORE_FAILED', message: e.message } });
   }
-  logAudit(req.user.id, null, 'backup-s3-restore', { backup: req.params.id, repos_restored: r.repos.restored.length, repos_failed: r.repos.failed.length });
-  res.json({ message: 'Backup restored. The server will restart now to load the restored database.', ...r });
+  const outcome = {
+    ...base, env_replaced: !!r.data?.envRestored, ...keyAuditFields(keyBefore, liveKeyFingerprint()),
+    files: (r.files || []).map((f) => ({ kind: f.kind, slug: f.slug || null, name: f.name || null, bytes: f.bytes ?? null, verified: !!f.verified })),
+    repos_restored: r.repos.restored.length, repos_failed: r.repos.failed.length,
+  };
+  logAudit(who.id, null, 'backup-s3-restore', outcome);
+  const recorded = recordInRestoredDb('backup-s3-restore', { ...outcome, instance: instanceName() });
+  res.json({ message: 'Backup restored. The server will restart now to load the restored database.', ...r, audit_in_restored_db: recorded });
   if (!process.env.APPCRANE_NO_RESTART_AFTER_IMPORT) setTimeout(() => process.exit(0), 1200);
 });
 
@@ -659,7 +707,12 @@ router.post('/backup/recovery-key', requireAuth, requirePlatformAdmin, recoveryK
 let restoreDbOps = null;
 export function __setRestoreDbOpsForTests(ops) { restoreDbOps = ops; }
 
-router.post('/backup/restore-database', requireAuth, requirePlatformAdmin, async (req, res) => {
+// Production needs the platform_archive step-up: a fresh dashboard session,
+// or an API key holding a grant its person made from one. A sandbox restore
+// keeps the admin key alone.
+const productionRestoreStepUp = (req, res, next) => ((req.body || {}).env === 'production' ? requireStepUp('platform_archive')(req, res, next) : next());
+
+router.post('/backup/restore-database', requireAuth, requirePlatformAdmin, productionRestoreStepUp, async (req, res) => {
   const { confineToBackups } = await import('../services/backupFiles.js');
   const { localBackupsDir } = await import('../services/localBackup.js');
   const { restoreFromExport } = await import('../services/managedDbBackup.js');
@@ -693,7 +746,7 @@ router.post('/backup/restore-database', requireAuth, requirePlatformAdmin, async
     const run = await runWithAppStopped({ app, envs, keepRunning },
       () => restoreFromExport({ archivePath: abs, appId: app.id, env, engine }, { ops: restoreDbOps }));
     const r = run.result;
-    logAudit(req.user.id, app.id, 'managed-db-restore', { engine, env, archive: String(archive).split('/').pop(), db_name: r.db_name, envs, keep_running: keepRunning, steps: run.steps });
+    logAudit(req.user.id, app.id, 'managed-db-restore', { engine, env, via: req.auth_kind || null, archive: String(archive).split('/').pop(), db_name: r.db_name, envs, keep_running: keepRunning, steps: run.steps });
     const message = `Restored the ${engine} database of ${app.slug} (${env}) from ${String(archive).split('/').pop()}`;
     if (run.startFailures.length) {
       return res.status(500).json({ error: { code: 'APP_START_FAILED', message: `${message}, but the app (${run.startFailures.map((f) => `${f.env}: ${f.error}`).join('; ')}) did not start again. Start it from the app page or redeploy.` }, steps: run.steps, ...r });
@@ -722,17 +775,31 @@ router.post('/backup/restore-database', requireAuth, requirePlatformAdmin, async
 // about its length (or is chunked) is cut off before it fills the disk.
 export const UPLOAD_DISK_RESERVE = 1024 * 1024 * 1024;
 
-router.post('/config/import', requireAuth, requirePlatformAdmin, async (req, res) => {
+// The confirm (this instance's name, GET /config/instance) is read from the
+// query string, or the JSON body, before any upload is read.
+router.post('/config/import', ...archiveGate, async (req, res) => {
   const { importDataArchive } = await import('../services/configBackup.js');
   const { ensureBackupsDir, freeBytes, confineToBackups } = await import('../services/backupFiles.js');
   const { rm } = await import('fs/promises');
   const restoreEnv = req.query.restore_env !== '0' && (req.body || {}).restore_env !== false;
+  const who = archiveActor(req);
+  const ip = archiveIp(req);
+  const confirm = typeof req.query.confirm === 'string' ? req.query.confirm : (req.body || {}).confirm;
+  if (!confirmMatches(confirm)) {
+    logAudit(who.id, null, 'config-import-refused', { ip, reason: 'confirm', confirm: typeof confirm === 'string' ? confirm.slice(0, 200) : null });
+    return res.status(400).json({ error: { code: 'CONFIRM_REQUIRED', message: `Type this instance's name (${instanceName()}) into confirm to import a backup over it`, instance: instanceName() } });
+  }
 
   // The uploaded copy is removed BEFORE answering, so a client that sees the
   // response never sees a key-bearing temp file still on disk.
   const runImport = async (path, cleanup) => {
     let result;
     let error;
+    const base = { ip, restore_env: restoreEnv, recovery_key_supplied: !!(req.body || {}).encryption_key, actor: { id: who.id, name: who.name || null, email: who.email || null } };
+    let sha256 = null;
+    try { sha256 = await sha256File(path); } catch (_) {}
+    const keyBefore = liveKeyFingerprint();
+    logAudit(who.id, null, 'config-import-started', { ...base, sha256, encryption_key: keyBefore });
     try {
       // A platform backup written without its key (v2.145.0) takes the
       // recovery key here: a JSON field or a multipart text field. Never logged.
@@ -741,8 +808,19 @@ router.post('/config/import', requireAuth, requirePlatformAdmin, async (req, res
       error = e;
     }
     if (cleanup) await rm(path, { force: true }).catch(() => {});
-    if (error) return res.status(error.status || 400).json({ error: { code: 'IMPORT_FAILED', message: error.message } });
-    res.json({ message: 'Backup imported. The server will restart now to load the restored database.', ...result });
+    if (error) {
+      logAudit(who.id, null, 'config-import-failed', { ...base, sha256, error: error.message });
+      return res.status(error.status || 400).json({ error: { code: 'IMPORT_FAILED', message: error.message } });
+    }
+    const keyAfter = liveKeyFingerprint();
+    const outcome = {
+      ...base, sha256, env_replaced: !!result.envRestored,
+      ...keyAuditFields(keyBefore, keyAfter),
+      pre_import_dir: result.preImportDir ? result.preImportDir.split('/').pop() : null,
+    };
+    logAudit(who.id, null, 'config-import', outcome);
+    const recorded = recordInRestoredDb('config-import', { ...outcome, instance: instanceName() });
+    res.json({ message: 'Backup imported. The server will restart now to load the restored database.', ...result, audit_in_restored_db: recorded });
     // better-sqlite3 holds the old DB open; restart so the imported one
     // takes effect. systemd brings the process back up. Delay so the
     // response flushes first.
@@ -1020,6 +1098,13 @@ router.put('/:key', requireAuth, requirePlatformAdmin, (req, res) => {
   const owner = ownedSettingRoute(req.params.key);
   if (owner) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: `Use ${owner} to change ${req.params.key}` } });
+  }
+  const guarded = protectedSetting(req.params.key);
+  if (guarded) {
+    const message = guarded.readOnly
+      ? `${req.params.key} is recorded by AppCrane only and cannot be written`
+      : `${req.params.key} is a protected setting: use ${guarded.route}`;
+    return res.status(409).json({ error: { code: 'PROTECTED_SETTING', message, route: guarded.route || null } });
   }
   const db = getDb();
 

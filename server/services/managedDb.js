@@ -109,7 +109,7 @@ import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import crypto from 'crypto';
 import { join, resolve } from 'path';
-import { mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, chmodSync, renameSync } from 'fs';
 import { getDb } from '../db.js';
 import { encrypt, decrypt } from './encryption.js';
 import log from '../utils/logger.js';
@@ -119,6 +119,7 @@ import * as mongo from './managedMongo.js';
 import { SANDBOX_TENANT } from './sandboxDb.js';
 import * as certs from './dbCerts.js';
 import * as tlsCfg from './managedDbTls.js';
+import * as tlsCheck from './managedDbTlsCheck.js';
 import { getManagedDbSettings } from './managedDbSettings.js';
 import * as tde from './managedDbEncryption.js';
 import * as appLogin from './managedDbAppLogin.js';
@@ -1431,6 +1432,7 @@ async function hardenServer(engine, port, adminPassword) {
     // The group pg_hba keys "TLS + client certificate + password" on. Created
     // here, idempotently, so it exists before any login is granted into it.
     tlsCfg.pgCertGroupSql(),
+    tlsCfg.pgTlsGroupSql(),
   ].join('\n'));
 }
 
@@ -2086,6 +2088,14 @@ function rowFor(scope, engine) {
   ).get(appId, tenant, engine) || null;
 }
 
+// The CA alone: a "TLS required" login, or (prepared) a login whose image
+// is handed the CA before the engine requires TLS.
+function caOnlyTls(prepared) {
+  return prepared
+    ? { required: false, prepared: true, level: 'prepared', caOnly: true, x509: false, ca: certs.clientFilePaths('').ca }
+    : { required: true, level: 'tls', caOnly: true, x509: false, ca: certs.clientFilePaths('').ca };
+}
+
 /**
  * TLS facts for a login, as the container sees them: the paths under the
  * client mount, or null for a login that does not require a certificate.
@@ -2093,7 +2103,12 @@ function rowFor(scope, engine) {
  * alone (managedMongo.x509UserScript) and must not send a password.
  */
 function tlsFor(row) {
-  if (row.client_cert_required !== 1) return null;
+  if (row.client_cert_required !== 1) {
+    // "TLS required" (migration 315): the CA that verifies the server, and
+    // nothing to present. Postgres and MariaDB only (requireTls).
+    if (row.tls_required === 1 && tlsCfg.POLICY_ENGINES.includes(row.engine)) return caOnlyTls(false);
+    return null;
+  }
   // Redis reads its own certificate (redis-client.*, signed by the instance's
   // CA); the other engines keep client.* (dbCerts.js header). ca.crt is the
   // same file for both: it verifies the SERVER.
@@ -2124,6 +2139,8 @@ function connectionFor(row, port) {
  *   redis     rediss:// (TLS); the files come from DB_*_FILE and
  *             REDIS_TLS_*_FILE (deployer.tlsFileEnv), as no Redis URL
  *             convention carries them
+ * A "TLS required" login (tls.caOnly) gets the same verification of the
+ * server and no client certificate parameters.
  */
 export function tlsUrl(conn, tls) {
   const enc = encodeURIComponent;
@@ -2135,6 +2152,12 @@ export function tlsUrl(conn, tls) {
   const auth = `${enc(conn.username)}:${enc(conn.password)}`;
   if (conn.engine === 'redis') return `rediss://${auth}@${hostPart}/${conn.database}`;
   const scheme = ENGINES[conn.engine].scheme;
+  if (tls.caOnly) {
+    const qs = conn.engine === 'postgres'
+      ? `sslmode=verify-full&sslrootcert=${enc(tls.ca)}`
+      : `ssl-mode=VERIFY_IDENTITY&ssl-ca=${enc(tls.ca)}`;
+    return `${scheme}://${auth}@${hostPart}/${conn.database}?${qs}`;
+  }
   const q = conn.engine === 'postgres'
     ? `sslmode=verify-full&sslrootcert=${enc(tls.ca)}&sslcert=${enc(tls.cert)}&sslkey=${enc(tls.key)}`
     : `ssl-mode=VERIFY_IDENTITY&ssl-ca=${enc(tls.ca)}&ssl-cert=${enc(tls.cert)}&ssl-key=${enc(tls.key)}`;
@@ -2430,7 +2453,7 @@ export function credentialsFor(scope, engine) {
 /** Rows for an app, without decrypting anything. Safe to hand to an API. */
 export function listForApp(appId) {
   return getDb().prepare(
-    'SELECT id, app_id, tenant, engine, db_name, db_user, client_cert_required, created_at FROM managed_databases WHERE app_id = ?'
+    'SELECT id, app_id, tenant, engine, db_name, db_user, client_cert_required, tls_required, created_at FROM managed_databases WHERE app_id = ?'
   ).all(Number(appId));
 }
 
@@ -2440,6 +2463,8 @@ export function listForApp(appId) {
  *
  *   tls          'required'  a client certificate AND TLS are enforced by the
  *                            engine (deployhub.json logins)
+ *                'tls_required'  TLS and the password are enforced, no client
+ *                            certificate (Require TLS, migration 315)
  *                'offered'   the server speaks TLS, the login may use plain
  *                            (catalogue logins on the shared servers)
  *                'none'      the instance does not speak TLS (a catalogue
@@ -2452,7 +2477,9 @@ export function tlsView(row) {
   const required = row.client_cert_required === 1;
   const settings = getManagedDbSettings(getDb());
   return {
-    tls: required ? 'required' : (ENGINES[row.engine]?.perScope ? 'none' : 'offered'),
+    tls: required ? 'required'
+      : (row.tls_required === 1 && tlsCfg.POLICY_ENGINES.includes(row.engine)) ? 'tls_required'
+        : (ENGINES[row.engine]?.perScope ? 'none' : 'offered'),
     client_cert_expires_at: required
       ? ((row.engine === 'redis' ? certs.redisClientCertInfo(row.db_name) : certs.clientCertInfo(row.db_user))?.not_after || null)
       : null,
@@ -2486,16 +2513,24 @@ export function tlsView(row) {
  * `ops` replaces the four engine-touching calls so the SQLite, certificate
  * and mount logic can be tested without a daemon. Production never passes it.
  */
-export async function secureLogin(scope, engine, { certRequired = false, image = null, resolveOwner = certs.resolveImageOwner, ops = null } = {}) {
+export async function secureLogin(scope, engine, { certRequired = false, prepareTls = false, image = null, resolveOwner = certs.resolveImageOwner, ops = null } = {}) {
   const { ensureServer: ensure, runAdminSql: sql, runAdminMongo: mongoScript, ensureRedisInstance: ensureRedis } = ops || {
     ensureServer, runAdminSql, runAdminMongo, ensureRedisInstance,
   };
   const row = rowFor(scope, engine);
   if (!row) return { applied: false, certRequired: false, mounts: [], tls: null };
   const requireCert = certRequired || row.client_cert_required === 1;
+  const requireTls = !requireCert && row.tls_required === 1 && tlsCfg.POLICY_ENGINES.includes(engine);
+  // "Prepare TLS": a catalogue image that names its CA variable
+  // (needs.tls_ca_env) gets the CA on every deploy, before any conversion,
+  // so a redeploy is all it takes for its connections to use TLS while the
+  // engine still accepts plain ones. The CA is public. Nothing about the
+  // login changes; Require TLS is the separate, measured step.
+  const prepare = !requireCert && !requireTls && prepareTls && tlsCfg.POLICY_ENGINES.includes(engine);
   const settings = getManagedDbSettings(getDb());
 
-  const files = requireCert ? await writeLoginFiles(row, { image, resolveOwner }) : null;
+  const files = requireCert ? await writeLoginFiles(row, { image, resolveOwner })
+    : (requireTls || prepare) ? writeCaOnlyFiles(row) : null;
 
   if (ENGINES[engine].perScope) {
     // Redis: the requirement is the instance's own start flags.
@@ -2522,6 +2557,7 @@ export async function secureLogin(scope, engine, { certRequired = false, image =
     await ensure(engine);
     await sql(engine, tlsCfg.loginPolicySql(engine, assertIdent(row.db_user), {
       certRequired: requireCert,
+      tlsRequired: requireTls,
       connLimit: settings.conn_limit,
       statementTimeoutS: settings.statement_timeout_s,
     }));
@@ -2536,9 +2572,31 @@ export async function secureLogin(scope, engine, { certRequired = false, image =
   return {
     applied: true,
     certRequired: requireCert,
-    tls: requireCert ? tlsFor(fresh) : null,
+    tlsRequired: requireTls,
+    tlsPrepared: prepare,
+    tls: requireCert || requireTls ? tlsFor(fresh) : (prepare ? caOnlyTls(true) : null),
     mounts: files ? [clientMountFor(fresh, files.hostDir)] : [],
   };
+}
+
+/**
+ * A "TLS required" login's files: ca.crt alone, in the login's own client
+ * directory (mounted read-only at CLIENT_MOUNT_PATH, like a certificate
+ * login's). The CA certificate is public, so it is world-readable and needs
+ * no owner. If the login is converted to a certificate later, writeClientFiles
+ * adds client.* next to it; deprovision removes the directory either way
+ * (dbCerts.releaseClientCerts).
+ */
+function writeCaOnlyFiles(row) {
+  const dir = certs.clientTlsDir(row.db_user);
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o755);
+  const path = join(dir, 'ca.crt');
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, certs.ensureCa().certPem, { mode: 0o444 });
+  chmodSync(tmp, 0o444);
+  renameSync(tmp, path);
+  return { hostDir: dir };
 }
 
 /**
@@ -2682,6 +2740,7 @@ export async function ensureAppLogin(scope, engine, {
     }
     await sql(engine, tlsCfg.loginPolicySql(engine, appUser, {
       certRequired,
+      tlsRequired: row.tls_required === 1,
       connLimit: settings.conn_limit,
       statementTimeoutS: settings.statement_timeout_s,
     }));
@@ -2840,6 +2899,128 @@ export async function requireCertificate(databaseId, { ops = null } = {}) {
     logins: [row.db_user, ...(appActive ? [row.app_user] : [])],
     redeploy_required: true,
   };
+}
+
+/**
+ * The platform admin's "Require TLS" (routes/managedDb.js): the level between
+ * password-only and Require certificate, for a catalogue image that can
+ * verify the server over TLS but cannot send a client certificate (BookStack
+ * reads only MYSQL_ATTR_SSL_CA). One database row's owner login and its
+ * enabled `_app` login:
+ *   postgres  GRANT appcrane_tls_required: hostssl + password; plain TCP is
+ *             rejected (managedDbTls.pgHbaConf). Counts towards strict pg_hba.
+ *   mariadb   REQUIRE SSL.
+ * Mongo and Redis have no per-login TLS switch (Mongo's tlsMode is per server,
+ * a TLS Redis instance requires a client certificate), so they are refused.
+ *
+ * A certificate login is already stronger: nothing changes and `level` says
+ * so. Sticky (tls_required = 1, migration 315); every later deploy and restart
+ * mounts the CA (secureLogin) and injects its path. Only revertTls() undoes it.
+ *
+ * Phase 2 of two: the engine refuses the login's plain connections from the
+ * moment this runs, so it goes ahead only when measureLoginTls() shows every
+ * measured connection of the login uses TLS (the app was redeployed with the
+ * CA, "Prepare TLS"), or there was nothing to measure and the admin passed
+ * confirmNoConnections. Otherwise it throws with the refusal's code.
+ */
+export async function requireTls(databaseId, { ops = null, confirmNoConnections = false } = {}) {
+  const { ensureServer: ensure, runAdminSql: sql } = ops || { ensureServer, runAdminSql };
+  const row = getDb().prepare('SELECT * FROM managed_databases WHERE id = ?').get(Number(databaseId));
+  if (!row) return null;
+  if (!tlsCfg.POLICY_ENGINES.includes(row.engine)) {
+    throw Object.assign(new Error(`managedDb: Require TLS is available for ${tlsCfg.POLICY_ENGINES.join(' and ')}, not ${row.engine}`), { code: 'TLS_LEVEL_UNSUPPORTED' });
+  }
+  const logins = rowLogins(row);
+  const base = { engine: row.engine, app_id: row.app_id, logins };
+  if (row.client_cert_required === 1) return { ...base, converted: false, level: 'certificate', redeploy_required: false };
+  let check = null;
+  if (row.tls_required !== 1) {
+    check = await measureLoginTls(row.id, { ops });
+    const refusal = tlsCheck.requireTlsRefusal(check, { confirmNoConnections });
+    if (refusal) throw Object.assign(new Error(`managedDb: ${refusal.message}`), { code: refusal.code, check });
+  }
+  const settings = getManagedDbSettings(getDb());
+  await ensure(row.engine);
+  for (const login of logins) {
+    await sql(row.engine, tlsCfg.loginPolicySql(row.engine, login, {
+      certRequired: false, tlsRequired: true, connLimit: settings.conn_limit, statementTimeoutS: settings.statement_timeout_s,
+    }));
+  }
+  const already = row.tls_required === 1;
+  if (!already) {
+    getDb().prepare('UPDATE managed_databases SET tls_required = 1 WHERE id = ?').run(row.id);
+    log.info(`managedDb: ${row.engine} login(s) ${logins.join(', ')} now require TLS (no client certificate)`);
+  }
+  if (row.engine === 'postgres') await syncPgHbaQuietly(ops ? ops.syncPgHba || (async () => null) : syncPgHba);
+  return { ...base, converted: !already, level: 'tls', redeploy_required: true, check };
+}
+
+function rowLogins(row) {
+  const appActive = Boolean(row.app_user && row.app_password_enc) && appLogin.APP_LOGIN_ENGINES.includes(row.engine);
+  return [row.db_user, ...(appActive ? [row.app_user] : [])].map(assertIdent);
+}
+
+/**
+ * Whether one database row's logins connect over TLS, measured in the engine
+ * (managedDbTlsCheck.js says how, per engine). Postgres: the current
+ * connections. MariaDB: the connections since the check started; `reset`
+ * (re)starts it, turning user statistics on. Read-only otherwise: no login
+ * changes. null for an unknown row; Mongo and Redis are refused like
+ * requireTls.
+ */
+export async function measureLoginTls(databaseId, { ops = null, reset = false } = {}) {
+  const { ensureServer: ensure, runAdminSql: sql } = ops || { ensureServer, runAdminSql };
+  const row = getDb().prepare('SELECT * FROM managed_databases WHERE id = ?').get(Number(databaseId));
+  if (!row) return null;
+  if (!tlsCfg.POLICY_ENGINES.includes(row.engine)) {
+    throw Object.assign(new Error(`managedDb: the TLS check is available for ${tlsCfg.POLICY_ENGINES.join(' and ')}, not ${row.engine}`), { code: 'TLS_LEVEL_UNSUPPORTED' });
+  }
+  const logins = rowLogins(row);
+  await ensure(row.engine);
+  const at = new Date().toISOString();
+  if (row.engine === 'postgres') {
+    const per = tlsCheck.parsePgConnections(await sql('postgres', tlsCheck.pgConnectionsSql(logins)), logins);
+    return { engine: row.engine, measured_at: at, ...tlsCheck.pgVerdict(per, logins) };
+  }
+  const now = tlsCheck.parseMariadbCounters(await sql('mariadb', tlsCheck.mariadbCountersSql(logins, { reset })), logins);
+  let base = null;
+  if (reset) {
+    base = { at, started: now.started, conn_id: now.conn_id, counters: now.counters };
+    getDb().prepare('UPDATE managed_databases SET tls_probe_base = ? WHERE id = ?').run(JSON.stringify(base), row.id);
+  } else {
+    try { base = row.tls_probe_base ? JSON.parse(row.tls_probe_base) : null; } catch (_) { base = null; }
+  }
+  return { engine: row.engine, measured_at: at, ...tlsCheck.mariadbVerdict(base, now, logins) };
+}
+
+/**
+ * The platform admin's "Revert to password": the only way back from Require
+ * TLS. Postgres: the logins leave appcrane_tls_required (so pg_hba accepts
+ * them with the password alone again, and strict pg_hba loosens if they were
+ * the reason it held). MariaDB: REQUIRE NONE, unless the row is also
+ * certificate-required, whose REQUIRE SUBJECT/ISSUER is left alone. Clears
+ * tls_required and the check's baseline. The CA mount and its variable stay
+ * on the next deploy (they are "Prepare TLS"), which a plain login ignores.
+ */
+export async function revertTls(databaseId, { ops = null } = {}) {
+  const { ensureServer: ensure, runAdminSql: sql } = ops || { ensureServer, runAdminSql };
+  const row = getDb().prepare('SELECT * FROM managed_databases WHERE id = ?').get(Number(databaseId));
+  if (!row) return null;
+  if (!tlsCfg.POLICY_ENGINES.includes(row.engine)) {
+    throw Object.assign(new Error(`managedDb: Require TLS is available for ${tlsCfg.POLICY_ENGINES.join(' and ')}, not ${row.engine}`), { code: 'TLS_LEVEL_UNSUPPORTED' });
+  }
+  const logins = rowLogins(row);
+  const base = { engine: row.engine, app_id: row.app_id, logins };
+  if (row.tls_required !== 1) return { ...base, reverted: false };
+  await ensure(row.engine);
+  for (const login of logins) {
+    const stmt = tlsCfg.tlsRevertSql(row.engine, login, { certRequired: row.client_cert_required === 1 });
+    if (stmt) await sql(row.engine, stmt);
+  }
+  getDb().prepare('UPDATE managed_databases SET tls_required = 0, tls_probe_base = NULL WHERE id = ?').run(row.id);
+  log.info(`managedDb: ${row.engine} login(s) ${logins.join(', ')} no longer require TLS (reverted to password)`);
+  if (row.engine === 'postgres') await syncPgHbaQuietly(ops ? ops.syncPgHba || (async () => null) : syncPgHba);
+  return { ...base, reverted: true };
 }
 
 async function dropInEngine(engine, database, username, appUser = null) {

@@ -336,7 +336,16 @@ test('routes: platform admin lists, downloads (verified) and restores; a typed c
   configure({ encrypt: false });
   const r = await sched.runS3Backup({ managedDbOps: ops() });
   const PA = generateApiKey('dhk_admin');
-  db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('PA','pa@example.com','platform_admin',?,1,'human')").run(hashApiKey(PA));
+  const paId = db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('PA','pa@example.com','platform_admin',?,1,'human')").run(hashApiKey(PA)).lastInsertRowid;
+  // A restore replaces the database: a fresh dashboard session only (v2.147.0).
+  const sessionFor = (ageMinutes) => {
+    const tok = randomBytes(24).toString('base64url');
+    db.prepare(`INSERT INTO identity_sessions (user_id, token_hash, expires_at, created_at)
+      VALUES (?, ?, datetime('now','+1 day'), datetime('now', ?))`).run(paId, hashApiKey(tok), `-${ageMinutes} minutes`);
+    return { bearer: tok };
+  };
+  const PA_FRESH = sessionFor(0);
+  const PA_STALE = sessionFor(60);
   const U = generateApiKey('dhk_user');
   db.prepare("INSERT INTO users (name,email,role,api_key_hash,active,kind) VALUES ('U','u@example.com','user',?,1,'human')").run(hashApiKey(U));
   const settingsRoutes = (await import('../server/routes/settings.js')).default;
@@ -346,7 +355,8 @@ test('routes: platform admin lists, downloads (verified) and restores; a typed c
   api.use((await import('../server/utils/errors.js')).errorHandler);
   const server = await new Promise((res) => { const s = api.listen(0, '127.0.0.1', () => res(s)); });
   const BASE = `http://127.0.0.1:${server.address().port}`;
-  const call = (method, p, key, body) => fetch(`${BASE}${p}`, { method, headers: { 'X-API-Key': key, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const call = (method, p, key, body) => fetch(`${BASE}${p}`, { method, headers: { ...(key.bearer ? { Authorization: `Bearer ${key.bearer}` } : { 'X-API-Key': key }), 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const audits = (action) => db.prepare('SELECT detail FROM audit_log WHERE action = ? ORDER BY id').all(action).map((x) => JSON.parse(x.detail));
   try {
     assert.equal((await call('GET', '/api/settings/backup/s3/backups', U)).status, 403);
     const list = await (await call('GET', '/api/settings/backup/s3/backups', PA)).json();
@@ -366,13 +376,43 @@ test('routes: platform admin lists, downloads (verified) and restores; a typed c
     assert.match((await dlBad.json()).error.message, /failed verification/);
     fake.objects.get(k).body = orig;
 
-    assert.equal((await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, PA, {})).status, 400);
-    assert.equal((await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, U, { confirm: r.set })).status, 403);
-    const restored = await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, PA, { confirm: r.set });
+    const both = { confirm: r.set, instance: 'Crane.Test' };
+    const byKey = await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, PA, both);
+    assert.equal(byKey.status, 403, 'an admin API key restored a whole-platform backup');
+    assert.equal((await byKey.json()).error.code, 'SESSION_REQUIRED');
+    const stale = await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, PA_STALE, both);
+    assert.equal(stale.status, 401);
+    assert.equal((await stale.json()).error.code, 'STEP_UP_REQUIRED');
+    assert.equal((await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, PA_FRESH, {})).status, 400);
+    const noInstance = await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, PA_FRESH, { confirm: r.set, instance: 'other.test' });
+    assert.equal(noInstance.status, 400);
+    assert.equal((await noInstance.json()).error.instance, 'crane.test');
+    assert.equal(audits('backup-s3-restore-refused').length, 1);
+    assert.equal(audits('backup-s3-restore-started').length, 0, 'a refused restore was recorded as started');
+    assert.equal((await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, U, both)).status, 403);
+    const restored = await call('POST', `/api/settings/backup/s3/backups/${r.set}/restore`, PA_FRESH, both);
     const body = await restored.json();
     assert.equal(restored.status, 200, JSON.stringify(body).slice(0, 400));
     assert.deepEqual(body.repos.restored.sort(), ['blog', 'shop']);
     assert.equal(body.repo_verification.matched, true);
+    const started = audits('backup-s3-restore-started');
+    assert.equal(started.length, 1);
+    assert.equal(started[0].backup, r.set);
+    assert.equal(started[0].actor.id, Number(paId));
+    const done = audits('backup-s3-restore');
+    assert.equal(done.length, 1);
+    assert.equal(done[0].repos_restored, 2);
+    assert.equal(typeof done[0].encryption_key_replaced, 'boolean');
+    assert.ok(done[0].files.some((f) => f.kind === 'data' && f.verified));
+    assert.equal(body.audit_in_restored_db, true);
+    const Database = (await import('better-sqlite3')).default;
+    const restoredDb = new Database(join(ROOT, 'deployhub.db'), { readonly: true });
+    try {
+      const rows = restoredDb.prepare("SELECT user_id, detail FROM audit_log WHERE action = 'backup-s3-restore'").all();
+      assert.equal(rows.length, 1, 'the restore is not recorded in the restored database');
+      assert.equal(rows[0].user_id, null);
+      assert.equal(JSON.parse(rows[0].detail).backup, r.set);
+    } finally { restoredDb.close(); }
   } finally {
     server.closeAllConnections?.();
     await new Promise((res) => server.close(res));

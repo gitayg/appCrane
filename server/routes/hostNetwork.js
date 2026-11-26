@@ -26,6 +26,7 @@ export function createHostNetworkRouter(deps = {}) {
       desired: posture.desired,
       strays: posture.strays,
       docker: posture.docker || null,
+      db: posture.db || null,
       last_sync: lastSync ? { status: lastSync.status, at: lastSync.at, mode: lastSync.mode || null, reason: lastSync.reason || null } : null,
     });
   });

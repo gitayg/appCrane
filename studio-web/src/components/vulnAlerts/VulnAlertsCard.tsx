@@ -19,7 +19,7 @@ export function VulnAlertsCard() {
     setBusy(true)
     setMsg('')
     try {
-      await adminApi.put('/api/settings/vuln_alerts_immediate', { value: next ? 'true' : 'false' })
+      await adminApi.put('/api/settings/protected/vuln_alerts_immediate', { value: next })
       setOn(next)
       setMsg('Saved.')
     } catch (e) {

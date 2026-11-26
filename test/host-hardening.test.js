@@ -184,6 +184,7 @@ test('unattended-upgrades: an operator 20auto-upgrades that turns it off is left
 const INSTALL = join(ROOT, 'scripts', 'install-host-hardening.sh');
 const DEST = '/usr/local/lib/appcrane/host-hardening.sh';
 const PUBLISH_HELPER = join(ROOT, 'scripts', 'appcrane-publish-chain.sh');
+const DB_HELPER = join(ROOT, 'scripts', 'appcrane-db-chain.sh');
 
 test('install.sh installs the sudo copy after running the script, passing the run user, without aborting on failure', () => {
   execFileSync('bash', ['-n', INSTALL]);
@@ -211,7 +212,7 @@ const skipSudo = sudoImage ? false : 'docker (or the package mirror) unavailable
 function installRun(runUser, after = '') {
   const body = [
     'mkdir -p /opt/appcrane/scripts /mnt/data',
-    'cp /src/host-hardening.sh /src/install-host-hardening.sh /src/appcrane-publish-chain.sh /opt/appcrane/scripts/',
+    'cp /src/host-hardening.sh /src/install-host-hardening.sh /src/appcrane-publish-chain.sh /src/appcrane-db-chain.sh /opt/appcrane/scripts/',
     'chown -R app:app /opt/appcrane',
     'printf "DATA_DIR=/mnt/data\\n" > /opt/appcrane/.env',
     `echo "@@INSTALL"; bash /opt/appcrane/scripts/install-host-hardening.sh ${runUser} 2>&1; echo "@@EXIT $?"`,
@@ -224,11 +225,14 @@ function installRun(runUser, after = '') {
     'echo "@@VISUDO"; visudo -c >/dev/null 2>&1; echo "rc=$?"',
     'echo "@@PUBHELPER"; stat -c \'%U:%G %a\' /usr/local/lib/appcrane/appcrane-publish-chain.sh 2>&1',
     'echo "@@PUBSUDOERS"; cat /etc/sudoers.d/appcrane-publish-chain 2>/dev/null || echo "@@MISSING"',
+    'echo "@@DBHELPER"; stat -c \'%U:%G %a\' /usr/local/lib/appcrane/appcrane-db-chain.sh 2>&1; cmp /src/appcrane-db-chain.sh /usr/local/lib/appcrane/appcrane-db-chain.sh && echo same',
+    'echo "@@DBSUDOERS"; cat /etc/sudoers.d/appcrane-db-chain 2>/dev/null || echo "@@MISSING"',
+    'echo "@@DBSUDOERSMODE"; stat -c \'%U:%G %a\' /etc/sudoers.d/appcrane-db-chain 2>&1',
     after,
     'echo "@@END"',
   ].join('\n');
   return execFileSync('docker', ['run', '--rm', '--tmpfs', '/mnt/data:size=64m',
-    '-v', `${SCRIPT}:/src/host-hardening.sh:ro`, '-v', `${INSTALL}:/src/install-host-hardening.sh:ro`, '-v', `${PUBLISH_HELPER}:/src/appcrane-publish-chain.sh:ro`,
+    '-v', `${SCRIPT}:/src/host-hardening.sh:ro`, '-v', `${INSTALL}:/src/install-host-hardening.sh:ro`, '-v', `${PUBLISH_HELPER}:/src/appcrane-publish-chain.sh:ro`, '-v', `${DB_HELPER}:/src/appcrane-db-chain.sh:ro`,
     sudoImage, 'bash', '-c', body], { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
@@ -240,6 +244,8 @@ test('install-host-hardening: root-owned copy with REPO_DIR baked, sudoers rule 
     `echo "@@RUN"; su app -c "sudo -n ${DEST}" 2>&1; echo "rc=$?"`,
     `echo "@@RUNARG"; su app -c "sudo -n ${DEST} x" 2>&1; echo "rc=$?"`,
     'echo "@@REPOSUDO"; su app -c "sudo -n bash /opt/appcrane/scripts/host-hardening.sh" 2>&1; echo "rc=$?"',
+    'echo "@@DBL"; su app -c "sudo -n -l /usr/local/lib/appcrane/appcrane-db-chain.sh close:45432" >/dev/null 2>&1; echo "rc=$?"',
+    'echo "@@DBREPO"; su app -c "sudo -n -l /opt/appcrane/scripts/appcrane-db-chain.sh close:45432" >/dev/null 2>&1; echo "rc=$?"',
   ].join('\n'));
   const sec = (n) => section(out, n);
   assert.match(out, /^@@EXIT 0$/m, out);
@@ -253,6 +259,11 @@ test('install-host-hardening: root-owned copy with REPO_DIR baked, sudoers rule 
   assert.equal(sec('VISUDO').trim(), 'rc=0');
   assert.equal(sec('PUBHELPER').trim(), 'root:root 755');
   assert.match(sec('PUBSUDOERS'), /^app ALL=\(root\) NOPASSWD: \/usr\/local\/lib\/appcrane\/appcrane-publish-chain\.sh$/m);
+  assert.equal(sec('DBHELPER').trim(), 'root:root 755\nsame');
+  assert.match(sec('DBSUDOERS'), /^app ALL=\(root\) NOPASSWD: \/usr\/local\/lib\/appcrane\/appcrane-db-chain\.sh$/m);
+  assert.equal(sec('DBSUDOERSMODE').trim(), 'root:root 440');
+  assert.equal(sec('DBL').trim(), 'rc=0', 'the run user may sudo the installed DB helper with arguments');
+  assert.equal(sec('DBREPO').trim(), 'rc=1', 'the repo copy of the DB helper is not sudoable');
   assert.match(sec('L'), /rc=0$/m, 'sudo -n -l <copy> exits 0 when permitted');
   assert.match(sec('LARG'), /rc=1$/m, 'with an argument it is not permitted');
   assert.match(sec('RUN'), /rc=0$/m, sec('RUN'));
@@ -268,4 +279,6 @@ test('install-host-hardening: a root run user gets the copy but no sudoers rule'
   assert.match(out, /^@@SUDOERS\n@@MISSING$/m, out);
   assert.equal(section(out, 'PUBHELPER').trim(), 'root:root 755', 'the helper is installed for a root server too');
   assert.match(out, /^@@PUBSUDOERS\n@@MISSING$/m, out);
+  assert.equal(section(out, 'DBHELPER').trim(), 'root:root 755\nsame', 'the DB helper is installed for a root server too');
+  assert.match(out, /^@@DBSUDOERS\n@@MISSING$/m, out);
 });

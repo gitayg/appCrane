@@ -13,6 +13,10 @@ import { dirname, join } from 'path';
 // running d1d91883's server/ tree through fixtures/container-recreate-golden.setup.js.
 // The route, and recreateEnvContainer for a user and for the system actor,
 // must issue exactly that argv and report the same injected keys.
+// v2.147.0 edited the recording by hand in one place only: the app's docker
+// run gained `--label appcrane.db-scope=` (the shared database scope both
+// shapes start in) right after `--label env=<env>`, which APPCRANE-DB reads
+// (hostFirewall/dbDesired.js). d1d91883 cannot record a label it never wrote.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const GOLDEN = JSON.parse(readFileSync(join(here, 'fixtures', 'container-recreate-golden-argv.json'), 'utf8'));

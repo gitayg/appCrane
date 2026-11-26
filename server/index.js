@@ -1244,6 +1244,7 @@ app.use('/api/mcp', mcpRoutes);          // Model Context Protocol endpoint (JSO
 // Safe to hoist ONLY because settingsRoutes now carries its own per-key auth
 // (v2.38.0). Before that, this accidental ordering WAS its protection, and
 // moving it would have made every setting world-readable.
+app.use('/api/settings/protected', (await import('./routes/protectedSettings.js')).default); // protected settings with no route of their own (platform admin; before /api/settings/:key)
 app.use('/api/settings', (await import('./routes/jobHealth.js')).default); // /api/settings/job-health (platform admin)
 app.use('/api/settings', (await import('./routes/hostHardening.js')).default); // /api/settings/host-hardening: Host limits (platform admin)
 app.use('/api/platform', (await import('./routes/hostNetwork.js')).default); // /api/platform/host-network (platform admin)
@@ -1951,6 +1952,7 @@ app.listen(PORT, HOST, async () => {
     try { const { startHostFirewall } = await import('./services/hostFirewall/index.js'); startHostFirewall(); } catch (e) { log.error('Host firewall sync failed to start: ' + e.message); }
     try { const { startHostHardeningAuto } = await import('./services/hostHardeningAuto.js'); startHostHardeningAuto({ version: VERSION }); } catch (e) { log.error('Host limits auto-apply failed to start: ' + e.message); }
     try { const { startHostGatewayCheck } = await import('./services/hostGateway.js'); startHostGatewayCheck(); } catch (e) { log.error('Host gateway check failed to start: ' + e.message); }
+    try { const { startDockerVersionCheck } = await import('./services/dockerVersionCheck.js'); startDockerVersionCheck(); } catch (e) { log.error('Docker version check failed to start: ' + e.message); }
     try { const { startManagedDbLoginsCheck } = await import('./services/managedDbPasswordOnly.js'); startManagedDbLoginsCheck(); } catch (e) { log.error('Managed DB logins check failed to start: ' + e.message); }
     try { const { startDeployLogRetention } = await import('./services/deployLogRetention.js'); startDeployLogRetention(); } catch (e) { log.error('Deploy log retention job failed to start: ' + e.message); }
     try { const { startBuildCachePrune } = await import('./services/buildCachePrune.js'); startBuildCachePrune(); } catch (e) { log.error('Build cache prune job failed to start: ' + e.message); }

@@ -969,7 +969,7 @@ export async function startApp(opts) {
   }
 }
 
-async function runAppContainer({ slug, env, image, imageId = null, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false, containerPort = CONTAINER_PORT, command = null }) {
+async function runAppContainer({ slug, env, image, imageId = null, hostPort, envVars = {}, volumes = [], memoryMb = 512, cpus = 0.5, addHostGateway = false, containerPort = CONTAINER_PORT, command = null, dbScope = null }) {
   const name = containerName(slug, env);
 
   // The argv-build boundary for the command (services/containerRuntimeSpec.js
@@ -1033,6 +1033,7 @@ async function runAppContainer({ slug, env, image, imageId = null, hostPort, env
     '--label', APPCRANE_LABEL,
     '--label', `slug=${slug}`,
     '--label', `env=${env}`,
+    ...(dbScope !== null ? ['--label', `appcrane.db-scope=${dbScope}`] : []),
     ...(imageId ? ['--label', `${IMAGE_REF_LABEL}=${image}`] : []),
     // v2.48.0: on-failure:2, down from 5. The direction was right and the count
     // was not. A process that OOMs under load OOMs again on the way back up, so
@@ -1220,7 +1221,12 @@ async function runAppContainer({ slug, env, image, imageId = null, hostPort, env
   // the point) and cannot influence how the container is created.
   if (runCommand) args.push(...runCommand);
 
-  const id = await dockerExec(args);
+  // APPCRANE-DB (services/hostFirewall/dbChain.js): Docker gives the container
+  // its address only when it starts, so its database ports are held open
+  // across the run and closed to everyone else once its address is read.
+  // Never fails or blocks the start.
+  const { withDbAccessDuringStart } = await import('./hostFirewall/dbChain.js');
+  const id = await withDbAccessDuringStart(name, () => dockerExec(args));
   invalidatePublishedPortsCache();   // the bindings just changed
   invalidateResourcesCache();        // and so did the applied limits
   log.info(

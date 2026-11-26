@@ -31,6 +31,7 @@ const SKELETON = [
   '-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN',
   '-A DOCKER-USER -d 169.254.169.254/32 -i docker0 -j DROP',
   '-A DOCKER-USER -d 169.254.169.254/32 -i br-+ -j DROP',
+  '-A DOCKER-USER -o docker0 -m conntrack --ctstate DNAT -j APPCRANE-DB',
   '-A DOCKER-USER -i eth0 -j APPCRANE-PUBLISH',
   '-A DOCKER-USER -i eth0 -j DROP',
   '-A DOCKER-USER -j RETURN',

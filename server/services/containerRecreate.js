@@ -4,6 +4,7 @@ import { AppError } from '../utils/errors.js';
 import { getPortsForSlot } from './portAllocator.js';
 import log from '../utils/logger.js';
 import { parseContainerCommand, parseVolumePaths, resolveVolumeMounts } from './containerRuntimeSpec.js';
+import { SANDBOX_TENANT } from './sandboxDb.js';
 
 // The body of POST /api/apps/:slug/restart/:env, moved here unchanged so the
 // host-gateway repair (hostGateway.js) recreates a container exactly the way
@@ -183,6 +184,7 @@ async function recreate({ app, env, actor, reason, precheck, onStop }) {
   // The managed database's client certificate mount (read-only, this
   // container only), when its login requires one. Same as the deploy path.
   let dbCertMounts = [];
+  let dbScope = null;
   {
     const { injectManagedDbForEnv } = await import('../services/deployer.js');
     // A custom app's database is declared in its release's deployhub.json.
@@ -201,6 +203,7 @@ async function recreate({ app, env, actor, reason, precheck, onStop }) {
       appendLog: (line) => log.info(`Restart ${containerName}: ${line}`),
     });
     dbCertMounts = mdbEnv.mounts || [];
+    dbScope = mdbEnv.separateSandbox ? SANDBOX_TENANT : '';
     if (mdbEnv.injected.length) {
       // Key names only. The values include a database password.
       log.info(`Restart ${containerName}: injected managed ${mdbEnv.engine} database var(s): ${mdbEnv.injected.join(', ')}`);
@@ -306,6 +309,7 @@ async function recreate({ app, env, actor, reason, precheck, onStop }) {
     memoryMb: limits.max_ram_mb,
     cpus: limits.max_cpu_percent / 100,
     addHostGateway: true,
+    dbScope,
   });
 
   return {

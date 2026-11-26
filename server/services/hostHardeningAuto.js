@@ -61,7 +61,7 @@ function writeState(db, state) {
     .run(STATE_KEY, JSON.stringify(state));
 }
 
-/** version=, source_sha256=, installed_sha256= lines of the stamp; null when absent or unreadable. */
+/** version=, source_sha256=, installed_sha256=, publish_chain_sha256=, db_chain_sha256= lines of the stamp; null when absent or unreadable. */
 export function parseStamp(text) {
   const out = {};
   for (const line of String(text).split('\n')) {
@@ -120,6 +120,10 @@ export function retryDelay(res, o = {}) {
  * checkout's script (by sha256) and the installed bytes are that script with
  * only REPO_DIR baked in. Either check failing means do not run it.
  */
+// The two root-owned helpers install-host-hardening.sh copies byte for byte
+// next to the script, by the stamp key that records each one's sha256.
+const HELPER_STAMPS = [['publish_chain_sha256', 'appcrane-publish-chain.sh'], ['db_chain_sha256', 'appcrane-db-chain.sh']];
+
 export function installedCopyMatches(d) {
   const read = (p) => { try { return d.readFile(p); } catch (_) { return null; } };
   const repo = read(join(d.repoDir, 'scripts', 'host-hardening.sh'));
@@ -129,6 +133,10 @@ export function installedCopyMatches(d) {
   if (!stamp) return { ok: false, why: `no stamp at ${STAMP_FILE}` };
   if (stamp.source_sha256 !== sha256(repo)) return { ok: false, why: 'stamp names another script', stamp };
   if (stamp.installed_sha256 && stamp.installed_sha256 !== sha256(installed)) return { ok: false, why: 'installed copy changed since it was stamped', stamp };
+  for (const [key, name] of HELPER_STAMPS) {
+    const helper = read(join(d.repoDir, 'scripts', name));
+    if (helper == null || stamp[key] !== sha256(helper)) return { ok: false, why: `stamp names another ${name}`, stamp };
+  }
   if (installed !== expectedInstalledCopy(repo, d.repoDir)) return { ok: false, why: 'installed copy differs from the checkout', stamp };
   return { ok: true, stamp };
 }

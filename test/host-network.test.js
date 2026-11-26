@@ -24,6 +24,7 @@ const SKELETON = (imds) => [
   '-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN',
   `-A DOCKER-USER -d ${imds} -i docker0 -j DROP`,
   `-A DOCKER-USER -d ${imds} -i br-+ -j DROP`,
+  '-A DOCKER-USER -o docker0 -m conntrack --ctstate DNAT -j APPCRANE-DB',
   '-A DOCKER-USER -i eth0 -j APPCRANE-PUBLISH',
   '-A DOCKER-USER -i eth0 -j DROP',
   '-A DOCKER-USER -j RETURN',
@@ -32,12 +33,14 @@ const PUBLISHED = '-A APPCRANE-PUBLISH -p udp -m conntrack --ctorigdstport 31001
 const SAVE = 'for t in iptables ip6tables; do $t-save -t filter | grep -v "^#" | sed "s/ \\[[0-9]*:[0-9]*\\]$//"; done';
 
 // APPCRANE-INPUT holds AppCrane's own surfaces only: its port accepted from
-// the container bridges, its port and the managed database ports dropped on
-// the public interface, nothing else.
+// the container bridges, new connections to its port and the managed database
+// ports dropped on the public interface, new connections to the database ports
+// dropped from docker0, nothing else.
 const chain = (ext = 'eth0', dbs = ['45432', '43306', '47017', '46379:46878']) => [
   '-A APPCRANE-INPUT -i docker0 -p tcp -m tcp --dport 5001 -j ACCEPT',
   '-A APPCRANE-INPUT -i br-+ -p tcp -m tcp --dport 5001 -j ACCEPT',
-  ...['5001', ...dbs].map((p) => `-A APPCRANE-INPUT -i ${ext} -p tcp -m tcp --dport ${p} -j DROP`),
+  ...['5001', ...dbs].map((p) => `-A APPCRANE-INPUT -i ${ext} -p tcp -m tcp --dport ${p} -m conntrack --ctstate NEW -j DROP`),
+  `-A APPCRANE-INPUT -i docker0 -p tcp -m multiport --dports ${dbs.join(',')} -m conntrack --ctstate NEW -j DROP`,
   '-A APPCRANE-INPUT -j RETURN',
 ];
 // Both families: the policy as <policy>, one jump, and exactly chain().

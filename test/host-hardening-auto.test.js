@@ -21,6 +21,8 @@ process.env.LOG_LEVEL = 'error';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_SRC = readFileSync(join(ROOT, 'scripts', 'host-hardening.sh'), 'utf8');
+const PUB_SRC = readFileSync(join(ROOT, 'scripts', 'appcrane-publish-chain.sh'), 'utf8');
+const DB_SRC = readFileSync(join(ROOT, 'scripts', 'appcrane-db-chain.sh'), 'utf8');
 
 const { initDb, getDb } = await import('../server/db.js');
 const { hashApiKey } = await import('../server/services/encryption.js');
@@ -37,7 +39,8 @@ const REPO_SCRIPT = `${REPO}/scripts/host-hardening.sh`;
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const enoent = (p) => Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
 const INSTALLED = H.expectedInstalledCopy(REPO_SRC, REPO);
-const STAMP = `version=2.145.0\nsource_sha256=${sha(REPO_SRC)}\ninstalled_sha256=${sha(INSTALLED)}\n`;
+const HELPERS = `publish_chain_sha256=${sha(PUB_SRC)}\ndb_chain_sha256=${sha(DB_SRC)}\n`;
+const STAMP = `version=2.145.0\nsource_sha256=${sha(REPO_SRC)}\ninstalled_sha256=${sha(INSTALLED)}\n${HELPERS}`;
 
 function fakeSpawn({ code = 0, out = '==> done\n', hold = null, never = false } = {}) {
   const calls = [];
@@ -57,7 +60,7 @@ function fakeSpawn({ code = 0, out = '==> done\n', hold = null, never = false } 
 }
 
 function host({ uid = 0, platform = 'linux', files = {}, systemd = true, iptables = true, sudoRule = true, spawn = fakeSpawn(), lastSync } = {}) {
-  const f = { [REPO_SCRIPT]: REPO_SRC, ...files };
+  const f = { [REPO_SCRIPT]: REPO_SRC, [`${REPO}/scripts/appcrane-publish-chain.sh`]: PUB_SRC, [`${REPO}/scripts/appcrane-db-chain.sh`]: DB_SRC, ...files };
   for (const k of Object.keys(f)) if (f[k] === null) delete f[k];
   const order = [];
   const deps = {
@@ -159,15 +162,18 @@ T('non-root with a matching stamp runs the root-owned copy through sudo with no 
 });
 
 T('non-root: a stamp for another script, no stamp, a changed installed copy, or no sudo rule never run anything; admins are mailed once per version only where a sudo rule exists', async () => {
-  const other = `version=2.144.0\nsource_sha256=${sha('#!/bin/bash\necho old\n')}\ninstalled_sha256=${sha(INSTALLED)}\n`;
+  const other = `version=2.144.0\nsource_sha256=${sha('#!/bin/bash\necho old\n')}\ninstalled_sha256=${sha(INSTALLED)}\n${HELPERS}`;
   const cases = [
     ['stamp names another script', { ...SUDO_FILES, [A.STAMP_FILE]: other }, true, 'stale', 1],
     ['no stamp', { ...SUDO_FILES, [A.STAMP_FILE]: null }, true, 'no-stamp', 1],
     ['installed copy changed', { ...SUDO_FILES, [H.INSTALLED_SCRIPT]: `${INSTALLED}echo extra\n` }, true, 'stale', 1],
-    ['stamp from another install', { ...SUDO_FILES, [A.STAMP_FILE]: `version=2.146.0\nsource_sha256=${sha(REPO_SRC)}\ninstalled_sha256=${sha('other')}\n` }, true, 'stale', 1],
+    ['stamp from another install', { ...SUDO_FILES, [A.STAMP_FILE]: `version=2.146.0\nsource_sha256=${sha(REPO_SRC)}\ninstalled_sha256=${sha('other')}\n${HELPERS}` }, true, 'stale', 1],
+    ['the database-chain helper changed since the stamp', { ...SUDO_FILES, [A.STAMP_FILE]: STAMP.replace(sha(DB_SRC), sha('old helper')) }, true, 'stale', 1],
+    ['the publish-chain helper changed since the stamp', { ...SUDO_FILES, [A.STAMP_FILE]: STAMP.replace(sha(PUB_SRC), sha('old helper')) }, true, 'stale', 1],
+    ['a stamp from an installer that did not record the helpers', { ...SUDO_FILES, [A.STAMP_FILE]: STAMP.replace(HELPERS, '') }, true, 'stale', 1],
     ['copy baked for another directory, stamped consistently', {
       ...SUDO_FILES, [H.INSTALLED_SCRIPT]: H.expectedInstalledCopy(REPO_SRC, '/srv/elsewhere'),
-      [A.STAMP_FILE]: `version=2.146.0\nsource_sha256=${sha(REPO_SRC)}\ninstalled_sha256=${sha(H.expectedInstalledCopy(REPO_SRC, '/srv/elsewhere'))}\n`,
+      [A.STAMP_FILE]: `version=2.146.0\nsource_sha256=${sha(REPO_SRC)}\ninstalled_sha256=${sha(H.expectedInstalledCopy(REPO_SRC, '/srv/elsewhere'))}\n${HELPERS}`,
     }, true, 'stale', 1],
     ['no sudo rule', SUDO_FILES, false, 'manual', 0],
     ['no installed copy', { [H.INSTALLED_SCRIPT]: null, [A.STAMP_FILE]: null }, true, 'manual', 0],

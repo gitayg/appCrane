@@ -35,7 +35,7 @@ if (images['24.04'] && buildTimeLeft() >= 1000) {
 test('install-host-hardening writes a root-owned stamp the automatic apply accepts, and refuses once the checkout changes', { skip: sudoImage ? false : 'docker (or the package mirror) unavailable' }, () => {
   const body = [
     'mkdir -p /opt/appcrane/scripts',
-    'cp /src/scripts/host-hardening.sh /src/scripts/install-host-hardening.sh /src/scripts/appcrane-publish-chain.sh /opt/appcrane/scripts/',
+    'cp /src/scripts/host-hardening.sh /src/scripts/install-host-hardening.sh /src/scripts/appcrane-publish-chain.sh /src/scripts/appcrane-db-chain.sh /opt/appcrane/scripts/',
     'cp /src/package.json /opt/appcrane/package.json',
     'chown -R app:app /opt/appcrane',
     'echo "@@INSTALL"; bash /opt/appcrane/scripts/install-host-hardening.sh app 2>&1; echo "@@EXIT $?"',
@@ -59,16 +59,25 @@ test('install-host-hardening writes a root-owned stamp the automatic apply accep
   assert.equal(stamp.version, version);
   assert.equal(stamp.source_sha256, sha(src));
   assert.equal(stamp.installed_sha256, sha(installed));
+  assert.equal(stamp.publish_chain_sha256, sha(readFileSync(join(SCRIPTS, 'appcrane-publish-chain.sh'), 'utf8')), 'the stamp names the publish helper it installed');
+  assert.equal(stamp.db_chain_sha256, sha(readFileSync(join(SCRIPTS, 'appcrane-db-chain.sh'), 'utf8')), 'the stamp names the database helper it installed');
   assert.equal(section(out, 'MODE').trim(), 'root:root 644');
-  assert.deepEqual(section(out, 'LEFT').trim().split('\n').sort(), ['appcrane-publish-chain.sh', 'host-hardening.sh', 'host-hardening.version'], 'no temporary files left');
+  assert.deepEqual(section(out, 'LEFT').trim().split('\n').sort(), ['appcrane-db-chain.sh', 'appcrane-publish-chain.sh', 'host-hardening.sh', 'host-hardening.version'], 'no temporary files left');
   assert.match(section(out, 'FORGE'), /Permission denied\n.*rc=[1-9]$/ms, 'the run user cannot write the stamp');
   const abort = section(out, 'ABORT').trim().split('\n');
   assert.match(abort[0], /^rc=[1-9]/, `the install must stop when chown fails: ${abort}`);
   assert.deepEqual(abort.slice(1), [], 'an install aborted by set -e leaves no temporary file behind');
 
-  const files = { '/opt/appcrane/scripts/host-hardening.sh': src, [H.INSTALLED_SCRIPT]: installed, [A.STAMP_FILE]: section(out, 'STAMP') };
+  const dbHelper = readFileSync(join(SCRIPTS, 'appcrane-db-chain.sh'), 'utf8');
+  const files = {
+    '/opt/appcrane/scripts/host-hardening.sh': src, [H.INSTALLED_SCRIPT]: installed, [A.STAMP_FILE]: section(out, 'STAMP'),
+    '/opt/appcrane/scripts/appcrane-publish-chain.sh': readFileSync(join(SCRIPTS, 'appcrane-publish-chain.sh'), 'utf8'),
+    '/opt/appcrane/scripts/appcrane-db-chain.sh': dbHelper,
+  };
   const d = (f) => ({ repoDir: '/opt/appcrane', readFile: (p) => { if (f[p] == null) throw new Error('ENOENT'); return f[p]; } });
   assert.deepEqual(A.installedCopyMatches(d(files)).ok, true);
   const upgraded = { ...files, '/opt/appcrane/scripts/host-hardening.sh': `${src}# a later release\n` };
   assert.equal(A.installedCopyMatches(d(upgraded)).ok, false);
+  const helperOnly = { ...files, '/opt/appcrane/scripts/appcrane-db-chain.sh': `${dbHelper}# a later release\n` };
+  assert.equal(A.installedCopyMatches(d(helperOnly)).ok, false, 'a release that changes only the database helper is stale');
 });
