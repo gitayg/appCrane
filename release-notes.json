@@ -1,4 +1,7 @@
 {
+  "2.147.1": [
+    "Starting a database TLS check, which resets its counters and turns on MariaDB's per-user statistics, now needs a signed-in dashboard session with step-up and is audited, like Require TLS."
+  ],
   "2.147.0": [
     "Restoring or importing the whole platform, and loading Docker images, now need a signed-in dashboard session with a fresh step-up, and every one is audited; a leaked API key can no longer take over an instance.",
     "AppCrane tracks which app containers may reach each managed database port and shows who else tries (observe mode); switching to enforce drops everyone else.",

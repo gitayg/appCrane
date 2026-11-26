@@ -305,6 +305,13 @@ test('routes: require-tls / revert-tls are platform admin, session only, step-up
     assert.equal(chk.status, 200, JSON.stringify(chk.body));
     assert.deepEqual([chk.body.connections, chk.body.tls, chk.body.plain, chk.body.ready], [1, 0, 1, false]);
     assert.equal(chk.body.blocked.code, 'TLS_PLAIN_CONNECTIONS');
+    // A reset changes engine state, so it takes the Require TLS gate: an API key is refused, a stale session must step up.
+    const keyReset = await call(`/logins/${cat.id}/tls-check`, PLATFORM, { reset: true }, 'key');
+    assert.equal(keyReset.status, 403, JSON.stringify(keyReset.body));
+    assert.equal(keyReset.body?.error?.code, 'SESSION_REQUIRED');
+    const staleReset = await call(`/logins/${cat.id}/tls-check`, session(30), { reset: true });
+    assert.equal(staleReset.status, 401, JSON.stringify(staleReset.body));
+    assert.equal((await call(`/logins/${cat.id}/tls-check`, session(), { reset: true })).status, 200);
     const refused = await call(`/logins/${cat.id}/require-tls`, session(), { confirm: true, confirm_no_connections: true });
     assert.equal(refused.status, 409, JSON.stringify(refused.body));
     assert.equal(refused.body.error.code, 'TLS_PLAIN_CONNECTIONS');

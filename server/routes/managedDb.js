@@ -637,13 +637,23 @@ serversRouter.post('/logins/:id/require-tls', requireAuth, requirePlatformAdmin,
  * (managedDb.measureLoginTls). Postgres: current connections. MariaDB: the
  * connections since the check started; { "reset": true } starts it again.
  */
-serversRouter.post('/logins/:id/tls-check', requireAuth, requirePlatformAdmin, async (req, res) => {
+// A reset changes engine state (MariaDB userstat server-wide, a new baseline), so
+// it takes the same gate as Require TLS; the read-only measurement does not.
+const tlsResetStepUp = requireStepUp('security_settings');
+function gateTlsReset(req, res, next) {
+  if (req.body?.reset !== true) return next();
+  requireSessionOnly(req, res, (err) => (err ? next(err) : tlsResetStepUp(req, res, next)));
+}
+
+serversRouter.post('/logins/:id/tls-check', requireAuth, requirePlatformAdmin, gateTlsReset, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) throw new AppError('Unknown managed database', 404, 'NOT_FOUND');
   const svc = await engineModule();
+  const reset = req.body?.reset === true;
   let check;
   try {
-    check = await svc.measureLoginTls(id, { reset: req.body?.reset === true });
+    check = await svc.measureLoginTls(id, { reset });
+    if (reset) logAudit(req.user.id, check?.app_id ?? null, 'managed-db-tls-check-reset', { id, ip: req.ip });
   } catch (err) {
     if (err?.code === 'TLS_LEVEL_UNSUPPORTED') throw new AppError(err.message.replace(/^managedDb: /, ''), 400, 'TLS_LEVEL_UNSUPPORTED');
     rethrowEngineError(err);
