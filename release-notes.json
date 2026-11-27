@@ -1,4 +1,7 @@
 {
+  "2.148.1": [
+    "A settings import that skips an encrypted setting now says to import again with the source instance's ENCRYPTION_KEY (it used to name a retired CLI flag), and counts settings in the singular when there is one."
+  ],
   "2.148.0": [
     "Settings > Backup has a Settings only section: export this instance's platform settings to a JSON file and import them on another AppCrane, with secrets re-encrypted for the new instance. Both need a signed-in session with step-up and are audited; crane config export and import point there."
   ],

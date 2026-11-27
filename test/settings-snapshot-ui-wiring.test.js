@@ -47,3 +47,11 @@ test('the source key is a masked field and is cleared after a successful import'
 test('crane config export/import point at the new section', () => {
   assert.match(cli, /Settings -> Backup & Restore -> Settings only/);
 });
+
+test('import messages name what the dashboard asks for, not the retired CLI flag, and count in the singular', () => {
+  const migration = read('../server/services/configMigration.js');
+  assert.doesNotMatch(migration, /--old-key/);
+  assert.match(migration, /encrypted; import again with the source instance's ENCRYPTION_KEY/);
+  assert.match(card, /k === 1 \? one : many/);
+  assert.doesNotMatch(card, /were skipped/);
+});

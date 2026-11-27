@@ -75,7 +75,7 @@ export function importConfig(config, oldKeyHex, db = getDb(), { includeProtected
       if (s.value == null) {
         upsert.run(s.key, null); result.imported++;
       } else if (s.encrypted) {
-        if (!oldKeyHex) { result.errors.push(`${s.key}: encrypted — re-run with the source ENCRYPTION_KEY (--old-key)`); continue; }
+        if (!oldKeyHex) { result.errors.push(`${s.key}: encrypted; import again with the source instance's ENCRYPTION_KEY`); continue; }
         let plain;
         try { plain = decrypt(s.value, oldKeyHex); }
         catch (e) { result.errors.push(`${s.key}: could not decrypt with the provided old key (${e.message})`); continue; }

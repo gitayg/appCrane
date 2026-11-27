@@ -73,7 +73,8 @@ export function SettingsSnapshotCard() {
       const out = await r.json() as ImportResult
       setResult(out)
       setSourceKey('')
-      setMsg({ ok: out.errors.length === 0, text: `Imported ${out.imported} settings (${out.reencrypted} re-encrypted).${out.errors.length ? ` ${out.errors.length} were skipped.` : ''}` })
+      const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`
+      setMsg({ ok: out.errors.length === 0, text: `Imported ${n(out.imported, 'setting', 'settings')} (${out.reencrypted} re-encrypted).${out.errors.length ? ` Skipped ${n(out.errors.length, 'setting', 'settings')}:` : ''}` })
     } catch (e) { setMsg({ ok: false, text: (e as Error).message }) }
     finally { setBusy(false); if (fileRef.current) fileRef.current.value = '' }
   }
