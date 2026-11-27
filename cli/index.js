@@ -87,20 +87,20 @@ const configCmd = program
 // listed and say where to go instead.
 function configArchiveMoved(what) {
   out.err(`crane config ${what} no longer works with an API key: settings snapshots need a signed-in dashboard session with a recent step-up.`);
-  out.dim('Use the dashboard instead: Settings -> Backup & Restore (Export / Import), signed in as a platform admin.');
+  out.dim('Use the dashboard instead: Settings -> Backup & Restore -> Settings only (Export settings / Import settings), signed in as a platform admin.');
   process.exit(1);
 }
 
 configCmd
   .command('export')
-  .description("Export this instance's settings (moved to the dashboard: Settings -> Backup)")
+  .description("Export this instance's settings (moved to the dashboard: Settings -> Backup -> Settings only)")
   .allowUnknownOption()
   .allowExcessArguments()
   .action(() => configArchiveMoved('export'));
 
 configCmd
   .command('import [file]')
-  .description('Import settings from an export (moved to the dashboard: Settings -> Backup)')
+  .description('Import settings from an export (moved to the dashboard: Settings -> Backup -> Settings only)')
   .allowUnknownOption()
   .allowExcessArguments()
   .action(() => configArchiveMoved('import'));

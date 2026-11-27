@@ -149,7 +149,7 @@ CapRover and Dokku are in one column because their access model is the same shap
   - The probe uses AppCrane's pinned helper image and removes it afterwards only if it pulled it.
   - `--dry-run` prints the plan. Docker restarts, so every container restarts: run it in a maintenance window.
   - On a fresh install, install.sh installs Docker CE instead of docker.io when Ubuntu's docker.io has the bug or is older than 27. `APPCRANE_DOCKER_SOURCE=distro` keeps docker.io. install.sh never switches Docker on an existing install.
-- **Protected settings**: settings that weaken a protection, a rate limit or a retention window (for example `host_gateway_auto_repair`, `restart_loop_*`, `db_allowlist_mode`, `supply_chain_verify_enabled`, `app_access_mail_enabled`) are refused by `PUT /api/settings/:key` (409 naming the route) and live at `GET/PUT /api/settings/protected/:key`: platform admin only, writes from a dashboard session only, step-up when a change weakens, and every write audited with the old and new value. Recorded state keys are read-only. `crane config export` and `crane config import` now exit with a pointer to Settings -> Backup, because these routes no longer accept API keys.
+- **Protected settings**: settings that weaken a protection, a rate limit or a retention window (for example `host_gateway_auto_repair`, `restart_loop_*`, `db_allowlist_mode`, `supply_chain_verify_enabled`, `app_access_mail_enabled`) are refused by `PUT /api/settings/:key` (409 naming the route) and live at `GET/PUT /api/settings/protected/:key`: platform admin only, writes from a dashboard session only, step-up when a change weakens, and every write audited with the old and new value. Recorded state keys are read-only. `crane config export` and `crane config import` now exit with a pointer to Settings -> Backup -> Settings only (added in v2.148.0), because these routes no longer accept API keys.
 - **Automatic gateway repair**: the hourly Container host gateway check (also 30 s after startup) recreates each running app container whose `/etc/hosts` maps `host.docker.internal` to an invalid address, the same way Restart on the app page does, then reads it again. It skips a container while a deploy, rollback, promote, database restore, restart, sleep or wake of that environment is in progress or the environment is asleep (checked again right before the stop), when new containers would themselves get Docker's `host-gateway` value, when it repaired that container in the last 6 hours, and after 3 in one run; platform setting `host_gateway_auto_repair` turns it off. During an automatic recreate, Restart and database restore of that environment answer 409, the sleeper skips it, and a deploy waits up to 3 minutes at its container swap. Each repair is a restart incident ("recreated to repair host.docker.internal", migration 300), two audit rows (actor `system:host-gateway`) and one e-mail to the app's owners.
 - **Host limits after an upgrade**: on the first boot of a new version AppCrane applies host hardening itself, after its first successful sync of `APPCRANE-PUBLISH`, in the background (Job Health "Host limits applied after an upgrade"; platform setting `host_hardening_auto_apply`, default on). As root it runs the checkout's script with a minimal environment. Otherwise it runs the root-owned copy through sudo only when the copy's stamp (`/usr/local/lib/appcrane/host-hardening.version`, written by `install-host-hardening.sh`) matches the checkout's script; when the script changed, it shows the one root command to run (`sudo bash scripts/install-host-hardening.sh`) and checks again hourly, so no restart is needed after it. A run that left out the DOCKER-USER drop is retried (10 minutes while ports are unsynced, hourly otherwise); the Host limits card shows the last run, marked automatic.
 - **Container host gateway**: app, builder and coder containers get `--add-host host.docker.internal:<default bridge gateway>` on Linux instead of Docker's `host-gateway` value (kept on Docker Desktop; override `HOST_GATEWAY_IP`). Job Health "Container host gateway" lists running containers whose `/etc/hosts` maps it to an invalid address; recreate them from the app page.
@@ -484,20 +484,27 @@ than altering the database under a running server. `crane init` is the one
 command that does migrate: it is the bootstrap, and there is no server yet.
 
 ### Migrate config between instances
-Move the platform `settings` (including encrypted secrets) to another AppCrane —
-without sharing encryption keys. Export keeps secrets ciphertext; import
-re-encrypts them with the target instance's own key.
-```bash
-# On the SOURCE instance:
-crane config export --out config.json
+Move the platform `settings` (including encrypted secrets) to another AppCrane,
+without sharing encryption keys. Apps, users, env vars and data are not included
+(use the full backup for those). Since v2.147.0 this needs a signed-in dashboard
+session with a recent step-up; `crane config export` and `crane config import`
+exit with a pointer here.
 
-# Copy config.json to the TARGET, then on the TARGET:
-OLD_ENCRYPTION_KEY=<source ENCRYPTION_KEY> crane config import config.json
-```
-The source `ENCRYPTION_KEY` (from the source's `.env`) is needed only to decrypt
-the secrets during import; it is used transiently, never stored. One-way values
-(e.g. the SCIM token, stored as a hash) can't be migrated — the import lists them
-to regenerate on the target. Delete `config.json` afterward.
+1. On the **source** instance: Settings -> Backup & Restore -> Settings only ->
+   **Export settings (.json)** (`GET /api/config/export`). Secrets stay ciphertext
+   under the source key.
+2. On the **target** instance: same section, paste the source `ENCRYPTION_KEY`
+   (only needed when the file has encrypted settings), then **Import settings
+   (.json)** (`POST /api/config/import` with `{ config, old_key, include_protected }`).
+   Secrets are re-encrypted with the target's own key; the source key is used for
+   that request only and never stored.
+
+A file that sets a protected or route-owned setting is refused whole (409
+`PROTECTED_SETTINGS`, the keys are listed) unless **Also import protected
+settings** is ticked; each such key is then audited with its old and new value.
+Every export and import is audited with a sha256. One-way values (e.g. the SCIM
+token, stored as a hash) can't be migrated: the import lists them to set again on
+the target. Delete the file afterward.
 
 ## App operations (MCP or REST)
 

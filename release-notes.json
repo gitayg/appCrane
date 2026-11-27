@@ -1,4 +1,7 @@
 {
+  "2.148.0": [
+    "Settings > Backup has a Settings only section: export this instance's platform settings to a JSON file and import them on another AppCrane, with secrets re-encrypted for the new instance. Both need a signed-in session with step-up and are audited; crane config export and import point there."
+  ],
   "2.147.1": [
     "Starting a database TLS check, which resets its counters and turns on MariaDB's per-user statistics, now needs a signed-in dashboard session with step-up and is audited, like Require TLS."
   ],

@@ -25,6 +25,7 @@ import { TwoFactorCard } from '../components/mfa/TwoFactorCard'
 import { RestoreDrillsCard } from '../components/backup/RestoreDrillsCard'
 import { OffsiteHealthBanner, type OffsiteHealth } from '../components/backup/OffsiteHealthBanner'
 import { RecoveryKeyCard } from '../components/backup/RecoveryKeyCard'
+import { SettingsSnapshotCard } from '../components/backup/SettingsSnapshotCard'
 import { archiveFetch, confirmInstanceName } from '../components/backup/configArchiveFetch'
 import { EvidencePackPanel } from '../components/compliance/EvidencePackPanel'
 import { SignInPolicyCard } from '../components/mfa/SignInPolicyCard'
@@ -1375,6 +1376,8 @@ function BackupTab() {
         onClick={() => fileRef.current?.click()} disabled={importing}>
         {importing ? 'Importing…' : '⬆ Import backup (replaces config + restarts)'}
       </button>
+
+      <SettingsSnapshotCard />
 
       <h3 style={{ marginTop: 24 }}>Managed databases</h3>
       <p className="settings-hint">
